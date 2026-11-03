@@ -769,7 +769,7 @@ class CertManager:
                 x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LiuZu YYDS Proxy"),
                 x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Mobile QA Security"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "LiuZu YYDS Root CA"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "RM YYDS Root CA"),
             ]
         )
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -1699,7 +1699,7 @@ class CharlesProxyEngine:
 
         html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>刘组YYDS 抓包证书安装</title>
+<title>RMYYDS 抓包证书安装</title>
 <style>
 body{font-family:sans-serif;background:#1E1F22;color:#DFE1E5;padding:24px;text-align:center;}
 .card{background:#2B2D30;border-radius:12px;padding:24px;max-width:420px;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.4);}
@@ -1954,7 +1954,7 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                 f"⚠️ HTTPS 解密握手未完成：{host}:{port}\n\n"
                 "可能原因：\n"
                 "1. 若抓电脑程序：请点击顶部『📲 安装证书』→ 点击『💻 一键安装证书到本机电脑』\n"
-                "2. 若抓手机应用：手机尚未安装「LiuZu YYDS Root CA」证书，或应用启用了 SSL Pinning\n"
+                "2. 若抓手机应用：手机尚未安装「RM YYDS Root CA」证书，或应用启用了 SSL Pinning\n"
             ).encode("utf-8")
             if self.is_target_captured(host) or (mapped_dom and self.is_target_captured(mapped_dom)):
                 self.flow_queue.put(flow)
@@ -2418,10 +2418,10 @@ class CharlesCaptureWindow:
         self.is_main_window = is_main_window
         if is_main_window:
             self.win = app.root
-            self.win.title("🌐 刘组YYDS - HTTP/HTTPS 接口抓包 & 手机投屏 & Logcat 工具")
+            self.win.title("🌐 RMYYDS - HTTP/HTTPS 接口抓包 & 手机投屏 & Logcat 工具")
         else:
             self.win = tk.Toplevel(app.root)
-            self.win.title("🌐 刘组YYDS - HTTP/HTTPS 接口抓包器 (类 Charles)")
+            self.win.title("🌐 RMYYDS - HTTP/HTTPS 接口抓包器 (类 Charles)")
         self.win.geometry("1380x840")
         self.win.minsize(1020, 640)
         self.win.configure(bg="#1E1F22")
@@ -3136,7 +3136,7 @@ class CharlesCaptureWindow:
         info = (
             "为什么需要安装证书？\n"
             "• HTTP 明文接口：无需证书，直接抓包即可看到完整参数与返回 JSON。\n"
-            "• HTTPS 加密接口：需要在抓包设备上安装一次「LiuZu YYDS Root CA」根证书。\n\n"
+            "• HTTPS 加密接口：需要在抓包设备上安装一次「RM YYDS Root CA」根证书。\n\n"
             "💻 抓电脑程序 (PC 客户端 / 浏览器 HTTPS 抓包)：\n"
             "  • 直接点击下方「💻 一键安装证书到本机电脑 (自动加入受信任根证书库)」即可完成信任！\n\n"
             "📱 抓手机 App — 方式一：ADB 一键推送证书到手机 Download 目录（推荐）\n"
@@ -3243,7 +3243,7 @@ class CharlesCaptureWindow:
                 )
                 if proc1.returncode == 0 or proc2.returncode == 0:
                     self._pc_cert_ensured = True
-                    self._post_status("✅ 已成功将『LiuZu YYDS Root CA』安装到本机 Windows 系统级与用户级受信任根证书库！")
+                    self._post_status("✅ 已成功将『RM YYDS Root CA』安装到本机 Windows 系统级与用户级受信任根证书库！")
                     self.win.after(
                         0,
                         lambda: messagebox.showinfo(

@@ -1,4 +1,4 @@
-# 刘组YYDS (Handy_tool)
+# RMYYDS (Handy_tool)
 
 一款专为 Android 开发与逆向分析打造的高性能集成工具箱：集成了 Android 日志查看器 (Logcat)、透明网络抓包与修改 (Charles Proxy / WinDivert 透明劫持)、以及低延迟屏幕投屏控制 (Scrcpy)。
 
@@ -22,7 +22,7 @@
 ## 🚀 快速启动
 
 ### 方式一：直接运行已打包的单文件版
-直接运行根目录下的 `刘组YYDS.exe` 即可（建议右键以管理员身份运行以启用透明驱动级抓包功能）。
+直接运行根目录下的 `RMYYDS.exe` 即可（程序已内置 UAC 管理员提权，双击点击允许即可启用透明驱动级抓包功能）。
 
 ### 方式二：通过 Python 源码运行
 1. 安装依赖：
@@ -36,5 +36,5 @@
 
 ### 方式三：重新打包
 ```bash
-pyinstaller --noconfirm 刘组YYDS.spec
+pyinstaller --noconfirm RMYYDS.spec
 ```

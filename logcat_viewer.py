@@ -126,7 +126,7 @@ class LogcatApp:
         # Logcat 独立窗口（默认隐藏，点击主页面「📜 Logcat日志」按钮时弹出）
         self.logcat_win = tk.Toplevel(self.root)
         self.logcat_win.withdraw()
-        self.logcat_win.title("📜 刘组YYDS - Android Logcat 日志查看器")
+        self.logcat_win.title("📜 RMYYDS - Android Logcat 日志查看器")
         self.logcat_win.geometry("1320x820")
         self.logcat_win.minsize(980, 620)
         self.logcat_win.configure(bg="#1E1F22")
