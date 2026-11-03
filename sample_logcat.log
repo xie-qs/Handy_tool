@@ -1,0 +1,16 @@
+10-29 16:35:01.102  1024  1055 I ActivityTaskManager: START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10200000 cmp=com.example.demo/.ui.MainActivity} from uid 10123
+10-29 16:35:01.145  1842  1842 D MainActivity: onCreate: initializing UI components and ViewModel
+10-29 16:35:01.210  1842  1860 D NetworkClient: GET https://api.example.com/v1/user/profile -> 200 OK {"code":0,"message":"success","data":{"uid":10086,"nickname":"AndroidDeveloper","vip":true,"roles":["admin","tester"]}}
+10-29 16:35:01.368  1024  1055 I ActivityTaskManager: Displayed com.example.demo/.ui.MainActivity: +266ms
+10-29 16:35:02.012  1842  1899 V RenderThread: DrawFrame complete: vsync_jitter=0.3ms, gpu_time=2.8ms
+10-29 16:35:02.450  1842  1910 W Glide   : Load failed for [https://cdn.example.com/banner.webp] with dimensions [1080x420], falling back to placeholder
+10-29 16:35:03.115  1842  1861 I OkHttp  : POST /v1/order/submit {"orderId":"ORD-20261029-8821","amount":299.0,"currency":"CNY","items":[{"sku":"DEV-PRO","qty":1}]}
+10-29 16:35:03.520  1842  1842 W Choreographer: Skipped 42 frames!  The application may be doing too much work on its main thread.
+10-29 16:35:04.005  1842  1842 E AndroidRuntime: FATAL EXCEPTION: main
+    Process: com.example.demo, PID: 1842
+    java.lang.NullPointerException: Attempt to invoke virtual method 'java.lang.String com.example.demo.model.OrderResult.getTransactionId()' on a null object reference
+        at com.example.demo.ui.OrderViewModel.onSubmitSuccess(OrderViewModel.kt:112)
+        at com.example.demo.ui.MainActivity$setupObservers$1.onChanged(MainActivity.kt:78)
+        at android.os.Handler.handleCallback(Handler.java:938)
+        at android.os.Looper.loop(Looper.java:223)
+10-29 16:35:04.510  2910  2915 F libc    : Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 in tid 2915 (NativeDecoder), pid 2910 (com.example.media)
