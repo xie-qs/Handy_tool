@@ -1008,9 +1008,13 @@ class LogcatApp:
                 ok1, out1 = self._run_adb_cmd(["-s", cur_serial, "tcpip", target_port], timeout=6)
                 time.sleep(1.0)
                 addr = f"{real_ip}:{target_port}"
-                ok2, out2 = self._run_adb_cmd(["connect", addr], timeout=6)
+                ok2, out2 = self._run_adb_cmd(["connect", addr], timeout=8)
+                success = ok2 and (("connected to" in out2.lower()) or ("already connected" in out2.lower()))
+                if not success:
+                    out_clean = out2.strip()
+                    if "timed out" in out_clean.lower() or "10060" in out_clean or "cannot connect" in out_clean.lower():
+                        out2 = f"连接超时：电脑无法访问手机 IP {real_ip}（请检查手机与电脑是否在同一 WiFi，或公司网络是否存在 AP 隔离/VPN路由拦截）"
                 combined = (out1.strip() + " | " + out2.strip()).strip(" |")
-                success = ("connected to" in out2.lower()) or ("already connected" in out2.lower())
                 self.ui_event_queue.put(("wifi_result", (success, addr, combined)))
 
             threading.Thread(target=bg, daemon=True).start()
