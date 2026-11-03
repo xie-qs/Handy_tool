@@ -274,6 +274,7 @@ class LogcatApp:
         self.device_combo.pack(side=tk.LEFT, padx=(0, 4))
 
         ttk.Button(top_bar, text="刷新设备", command=self.refresh_devices).pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_bar, text="⚡ 重启ADB", command=self.restart_adb_server).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_bar, text="📶 WiFi连接", command=self.open_wifi_adb_dialog).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_bar, text="📱 手机投屏", command=self.start_screen_mirror).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_bar, text="🎮 遥控/设置", command=self.open_mirror_control_dialog).pack(side=tk.LEFT, padx=2)
@@ -297,8 +298,6 @@ class LogcatApp:
 
         ttk.Button(top_bar, text="📂 打开日志文件", command=self.open_log_file).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_bar, text="💾 导出当前日志", command=self.export_logs).pack(side=tk.LEFT, padx=2)
-        self.btn_sim = ttk.Button(top_bar, text="🧪 模拟实时日志", command=self.toggle_simulation)
-        self.btn_sim.pack(side=tk.LEFT, padx=(6, 2))
 
         ttk.Button(top_bar, text="⬇ 滚到底部", command=self.scroll_to_bottom).pack(side=tk.RIGHT, padx=2)
         ttk.Checkbutton(
@@ -752,6 +751,37 @@ class LogcatApp:
         except Exception as e:
             return False, str(e)
 
+    def restart_adb_server(self):
+        """重启 ADB 后台服务 (kill-server & start-server) 并重新检测设备"""
+        def _bg():
+            self.status_label.config(text="⏳ 正在重启 ADB 服务 (kill-server & start-server)...")
+            if getattr(self, "is_capturing", False):
+                self.stop_capture()
+
+            self._run_adb_cmd(["kill-server"], timeout=5)
+            time.sleep(0.5)
+
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/IM", "adb.exe"],
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        timeout=3,
+                    )
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+            ok, out = self._run_adb_cmd(["start-server"], timeout=8)
+            time.sleep(1.0)
+            self.refresh_devices()
+
+            msg = "✅ ADB 服务已成功重启并刷新设备列表！" if ok else f"⚠ 重启 ADB 完成: {out.strip()}"
+            self.root.after(0, lambda: messagebox.showinfo("ADB 服务", msg, parent=self.root))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     def refresh_devices(self):
         """在后台线程检测设备列表，避免主界面卡顿或关闭无响应"""
         def task():
@@ -803,7 +833,7 @@ class LogcatApp:
             self.device_var.set("")
             if not self.is_capturing:
                 self.status_label.config(
-                    text="ℹ 当前未检测到连接设备（可连接手机开启 USB 调试，或打开本地文件 / 点击“模拟实时日志”）"
+                    text="ℹ 当前未检测到连接设备（请连接手机开启 USB 调试，或点击“📶 WiFi连接”进行无线调试）"
                 )
 
     def _get_selected_serial(self) -> str:
@@ -1833,49 +1863,12 @@ class LogcatApp:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # -------------------- 模拟日志生成（方便无设备时测试） --------------------
+    # -------------------- 模拟日志生成（已废弃移除） --------------------
     def toggle_simulation(self):
-        if self.sim_running:
-            self.sim_running = False
-            self.btn_sim.config(text="🧪 模拟实时日志")
-            self.btn_pause.config(state=tk.DISABLED, text="⏸ 暂停")
-            self.status_label.config(text="⏹ 已停止模拟日志")
-        else:
-            if self.is_capturing:
-                self.stop_capture()
-            self.sim_running = True
-            self.is_paused = False
-            self.auto_scroll.set(True)
-            self.btn_sim.config(text="⏹ 停止模拟")
-            self.btn_pause.config(state=tk.NORMAL, text="⏸ 暂停")
-            self.status_label.config(text="🧪 正在生成模拟 Android 实时日志（可测试级别、Tag、搜索、JSON详情等功能）...")
-            threading.Thread(target=self._simulation_loop, daemon=True).start()
+        pass
 
     def _simulation_loop(self):
-        import random
-
-        samples = [
-            ("D", "NetworkClient", "1842", "1860", 'GET https://api.example.com/v1/user/profile -> 200 OK {"code":0,"data":{"uid":10086,"nickname":"AndroidDev","vip":true,"tags":["kotlin","jetpack","compose"]},"cost_ms":42}'),
-            ("I", "ActivityTaskManager", "1024", "1055", "Displayed com.example.demo/.ui.MainActivity: +268ms"),
-            ("V", "RenderThread", "1842", "1899", "DrawFrame complete: vsync_jitter=0.4ms, gpu_time=3.1ms"),
-            ("W", "Glide", "1842", "1910", "Load failed for [https://cdn.example.com/avatar_hd.png] with dimensions [200x200], falling back to local cache"),
-            ("D", "BluetoothGatt", "1420", "1433", "onClientConnectionState() - status=0 clientIf=6 device=AA:BB:CC:11:22:33"),
-            ("I", "OkHttp", "1842", "1861", 'POST /v1/order/submit {"orderId":"ORD-20261029-9981","amount":199.00,"currency":"CNY","items":[{"sku":"PRO-01","qty":1}]}'),
-            ("E", "AndroidRuntime", "1842", "1842", "FATAL EXCEPTION: main\n    Process: com.example.demo, PID: 1842\n    java.lang.NullPointerException: Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference\n        at com.example.demo.ui.OrderViewModel.submitOrder(OrderViewModel.kt:84)\n        at com.example.demo.ui.MainActivity$onCreate$2.onClick(MainActivity.kt:47)\n        at android.view.View.performClick(View.java:7892)"),
-            ("W", "Choreographer", "1842", "1842", "Skipped 38 frames!  The application may be doing too much work on its main thread."),
-            ("F", "libc", "2910", "2915", "Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 in tid 2915 (NativeCodec), pid 2910 (com.example.media)"),
-        ]
-
-        while self.sim_running:
-            lvl, tag, pid, tid, msg = random.choice(samples)
-            now_str = datetime.now().strftime("%m-%d %H:%M:%S.%f")[:-3]
-            for idx, subline in enumerate(msg.split("\n")):
-                if idx == 0:
-                    raw = f"{now_str}  {pid}  {tid} {lvl} {tag}: {subline}"
-                else:
-                    raw = subline
-                self.log_queue.put(raw)
-            time.sleep(random.uniform(0.12, 0.45))
+        pass
 
     # -------------------- 队列消费与高性能批量渲染 --------------------
     def _process_log_queue(self):

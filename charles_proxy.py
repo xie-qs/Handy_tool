@@ -2612,9 +2612,7 @@ class CharlesCaptureWindow:
         )
         self.btn_rules.pack(side=tk.LEFT, padx=2)
 
-        ttk.Button(
-            top_bar, text="🧪 模拟请求", command=self.generate_simulated_flows
-        ).pack(side=tk.LEFT, padx=2)
+
         ttk.Button(top_bar, text="🗑 清空", command=self.clear_flows).pack(side=tk.LEFT, padx=2)
 
         # 右侧：手机设备选择 + WiFi连接 + 手机投屏 + 打开 Logcat 日志窗口
@@ -2636,8 +2634,13 @@ class CharlesCaptureWindow:
         ).pack(side=tk.RIGHT, padx=2)
         ttk.Button(
             top_bar,
-            text="🔄",
+            text="🔄 刷新设备",
             command=self.app.refresh_devices,
+        ).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(
+            top_bar,
+            text="⚡ 重启ADB",
+            command=self.app.restart_adb_server,
         ).pack(side=tk.RIGHT, padx=2)
         self.main_device_combo = ttk.Combobox(
             top_bar,
