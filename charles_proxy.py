@@ -90,6 +90,9 @@ _BYPASS_EXE_NAMES: set[str] = {
     "gameviewerserver.exe",
     "gameviewerservice.exe",
     "gameviewer.exe",
+    # 企业微信微盘/图片传输专用独立进程（带强 SSL Pinning，放行直连以消除发图转圈；绝不影响微信/企微小程序 WeChatAppEx / WXWorkWeb）
+    "wxdrive_x64.exe",
+    "wxdrive.exe",
 }
 
 
@@ -555,6 +558,25 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
             if enable:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
+                # 仅豁免强 SSL Pinning 的企微微盘传图与腾讯纯图片 CDN，彻底解决企微发图转圈超时等待；
+                # 微信小程序（*.servicewechat.com 及各类小程序业务 API 域名）不在此列，正常走代理抓包
+                proxy_override = (
+                    "localhost;127.0.0.1;<local>;"
+                    "*.file.weixin.qq.com;"
+                    "*.wxwork.file.weixin.qq.com;"
+                    "*.qpic.cn;"
+                    "*.res.wx.qq.com"
+                )
+                winreg.SetValueEx(
+                    key,
+                    "ProxyOverride",
+                    0,
+                    winreg.REG_SZ,
+                    proxy_override,
+                )
+                _WIN_PROXY_ACTIVE = True
+            else:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 winreg.SetValueEx(
                     key,
                     "ProxyOverride",
@@ -562,9 +584,6 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
                     winreg.REG_SZ,
                     "localhost;127.0.0.1;<local>",
                 )
-                _WIN_PROXY_ACTIVE = True
-            else:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 _WIN_PROXY_ACTIVE = False
 
         try:
@@ -1608,6 +1627,13 @@ class CharlesProxyEngine:
         if h in self.tls_passthrough_hosts:
             return False
 
+        # 强 SSL Pinning 保护域名（企微微盘文件与腾讯纯图片 CDN，无法被中间人解密，解密会导致客户端转圈超时）
+        # 除非用户显式单独添加该规则，否则在通配模式下直接透传，保证通讯秒发且不卡顿
+        for d in ("file.weixin.qq.com", "wxwork.file.weixin.qq.com", "qpic.cn", "res.wx.qq.com"):
+            if h == d or h.endswith("." + d):
+                if "*" in self.capture_rules and h not in self.capture_rules and f"*.{d}" not in self.capture_rules:
+                    return False
+
         # 检查是否直接命中抓包目标（包括 IP 已映射到目标域名的情况）
         if self.is_target_captured(h):
             return True
@@ -1801,7 +1827,8 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                 else:
                     # 若属于后台白名单进程或未启用解密的域名，直接通过豁免端口段透传到目标域名/IP
                     exe_clean = proc_name[2:].strip().lower() if proc_name.startswith("💻 ") else ""
-                    if exe_clean in _BYPASS_EXE_NAMES:
+                    is_pinned_domain = any(host == d or host.endswith("." + d) for d in ("file.weixin.qq.com", "wxwork.file.weixin.qq.com", "qpic.cn", "res.wx.qq.com"))
+                    if exe_clean in _BYPASS_EXE_NAMES or is_pinned_domain:
                         self._bridge_raw_socket(client_sock, host, port)
                     else:
                         self._handle_connect_tunnel(
