@@ -2361,6 +2361,9 @@ class LogcatApp:
             ctrl = getattr(self, "_charles_win_ctrl", None)
             if ctrl is not None:
                 ctrl.shutdown_cleanly()
+            else:
+                import charles_proxy
+                charles_proxy.force_reset_system_proxy()
         except Exception:
             pass
         try:
@@ -2391,6 +2394,15 @@ class LogcatApp:
 
 
 def main():
+    # 启动防呆自检：检测是否有上次异常退出残留的本地系统代理，若有则自动安全恢复直连
+    try:
+        import charles_proxy
+        fixed, msg = charles_proxy.check_and_restore_residual_proxy(8888)
+        if fixed:
+            print(f"[RMYYDS 启动自检] {msg}")
+    except Exception:
+        pass
+
     if sys.platform == "win32":
         try:
             import ctypes

@@ -578,6 +578,69 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
         return False, str(e)
 
 
+def check_and_restore_residual_proxy(default_port: int = 8888) -> tuple[bool, str]:
+    """
+    启动防呆自检：检测 Windows 注册表系统代理是否残留指向本地抓包端口（如 127.0.0.1:8888）。
+    如果发现残留（通常因上次程序被任务管理器强杀、崩溃或断电所致），自动重置为直连模式，防止电脑持续断网。
+    返回: (是否执行了修复, 说明信息)
+    """
+    if sys.platform != "win32":
+        return False, "非 Windows 系统"
+    try:
+        import winreg
+        reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_READ) as key:
+            try:
+                enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except Exception:
+                enabled = 0
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except Exception:
+                server = ""
+
+        # 仅当代理处于开启状态，且明确指向 8888 端口（或 127.0.0.1:8888）时触发自动安全重置，避免误动用户自设的外部代理
+        if enabled == 1 and (f":{default_port}" in str(server) or "127.0.0.1:8888" in str(server)):
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            try:
+                wininet = ctypes.windll.wininet
+                wininet.InternetSetOptionW(0, 39, 0, 0)
+                wininet.InternetSetOptionW(0, 37, 0, 0)
+            except Exception:
+                pass
+            return True, f"检测到上次异常退出残留的本地系统代理 ({server})，已自动为您安全重置，电脑网络已恢复正常！"
+        return False, "系统网络正常"
+    except Exception as e:
+        return False, f"自检代理失败: {e}"
+
+
+def force_reset_system_proxy() -> tuple[bool, str]:
+    """一键重置/恢复电脑系统代理为直连模式，确保网络完全通畅"""
+    global _WIN_PROXY_ACTIVE
+    _WIN_PROXY_ACTIVE = False
+    try:
+        _GLOBAL_DIVERT.stop()
+    except Exception:
+        pass
+    if sys.platform != "win32":
+        return False, "非 Windows 系统"
+    try:
+        import winreg
+        reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        try:
+            wininet = ctypes.windll.wininet
+            wininet.InternetSetOptionW(0, 39, 0, 0)
+            wininet.InternetSetOptionW(0, 37, 0, 0)
+        except Exception:
+            pass
+        return True, "已成功将电脑系统代理重置为直连模式，网络已恢复通畅！"
+    except Exception as e:
+        return False, f"重置代理失败: {e}"
+
+
 def _atexit_restore_win_proxy():
     try:
         _GLOBAL_DIVERT.stop()
@@ -2435,6 +2498,7 @@ class CharlesCaptureWindow:
         self.filtered_flows: list[HttpFlow] = []
         self.flow_map: dict[int, HttpFlow] = {}
         self.host_counts: dict[str, int] = {}
+        self.max_keep_flows: int = 5000  # 内存保护：最大保留5000条抓包记录，超出自动滚动淘汰最旧流
         self.selected_host = "__ALL__"
         self.selected_flow: HttpFlow | None = None
         self.mounted_proxy_serial = ""
@@ -2460,6 +2524,11 @@ class CharlesCaptureWindow:
 
         self._setup_treeview_style()
         self._build_ui()
+
+        # 启动防呆自检：如果上次异常强退残留系统代理，自动修复并提示
+        fixed, msg = check_and_restore_residual_proxy(default_port=8888)
+        if fixed and hasattr(self, "status_label"):
+            self.status_label.config(text=f"🛡️ {msg}")
         self._refresh_rules_button_count()
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_flows()
@@ -3101,10 +3170,12 @@ class CharlesCaptureWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def clear_adb_proxy(self, silent: bool = False):
+        # 同时恢复电脑 Windows 系统代理为直连模式
+        force_reset_system_proxy()
         serial = self.mounted_proxy_serial or self.app._get_selected_serial()
         if not serial:
             if not silent:
-                messagebox.showinfo("提示", "当前未检测到连接的 Android 设备", parent=self.win)
+                self._post_status("🧹 已将电脑系统代理重置为直连模式（当前未连接手机）")
             return
 
         def _worker():
@@ -3350,6 +3421,24 @@ class CharlesCaptureWindow:
                     if self._matches_flow_filter(flow):
                         self.filtered_flows.append(flow)
                         self._insert_flow_row(flow)
+
+                # 内存保护机制：超出最大保留条数时，滚动淘汰最旧记录，防止长期运行内存无限暴涨
+                if len(self.all_flows) > self.max_keep_flows:
+                    overflow = len(self.all_flows) - self.max_keep_flows
+                    evicted = self.all_flows[:overflow]
+                    del self.all_flows[:overflow]
+                    for ef in evicted:
+                        self.flow_map.pop(ef.flow_id, None)
+                        if ef.host in self.host_counts:
+                            self.host_counts[ef.host] -= 1
+                            if self.host_counts[ef.host] <= 0:
+                                self.host_counts.pop(ef.host, None)
+                        iid = str(ef.flow_id)
+                        if self.tree.exists(iid):
+                            self.tree.delete(iid)
+                    evicted_ids = {ef.flow_id for ef in evicted}
+                    self.filtered_flows = [f for f in self.filtered_flows if f.flow_id not in evicted_ids]
+                    host_changed = True
 
                 if proc_changed and hasattr(self, "proc_cb") and self.proc_cb.winfo_exists():
                     self.proc_cb["values"] = [
@@ -4813,8 +4902,10 @@ class CharlesCaptureWindow:
         self._refresh_host_listbox()
         for txt in (self.txt_resp_body, self.txt_req_body, self.txt_headers, self.txt_curl):
             txt.delete("1.0", tk.END)
+        import gc
+        gc.collect()
         self._update_counts()
-        self.status_label.config(text="🗑 已清空所有抓包记录")
+        self.status_label.config(text="🗑 已清空所有抓包记录，内存已安全释放")
 
     def copy_url(self):
         if not self.selected_flow:
