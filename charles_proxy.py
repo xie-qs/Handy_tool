@@ -90,9 +90,6 @@ _BYPASS_EXE_NAMES: set[str] = {
     "gameviewerserver.exe",
     "gameviewerservice.exe",
     "gameviewer.exe",
-    # 企业微信微盘/图片传输专用独立进程（带强 SSL Pinning，放行直连以消除发图转圈；绝不影响微信/企微小程序 WeChatAppEx / WXWorkWeb）
-    "wxdrive_x64.exe",
-    "wxdrive.exe",
 }
 
 
@@ -558,25 +555,6 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
             if enable:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
-                # 仅豁免强 SSL Pinning 的企微微盘传图与腾讯纯图片 CDN，彻底解决企微发图转圈超时等待；
-                # 微信小程序（*.servicewechat.com 及各类小程序业务 API 域名）不在此列，正常走代理抓包
-                proxy_override = (
-                    "localhost;127.0.0.1;<local>;"
-                    "*.file.weixin.qq.com;"
-                    "*.wxwork.file.weixin.qq.com;"
-                    "*.qpic.cn;"
-                    "*.res.wx.qq.com"
-                )
-                winreg.SetValueEx(
-                    key,
-                    "ProxyOverride",
-                    0,
-                    winreg.REG_SZ,
-                    proxy_override,
-                )
-                _WIN_PROXY_ACTIVE = True
-            else:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 winreg.SetValueEx(
                     key,
                     "ProxyOverride",
@@ -584,6 +562,9 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
                     winreg.REG_SZ,
                     "localhost;127.0.0.1;<local>",
                 )
+                _WIN_PROXY_ACTIVE = True
+            else:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                 _WIN_PROXY_ACTIVE = False
 
         try:
@@ -1627,24 +1608,6 @@ class CharlesProxyEngine:
         if h in self.tls_passthrough_hosts:
             return False
 
-        # 企微主程序与微盘传图防转圈核心优化：
-        # 企微发图片/文件使用腾讯内部 HTTPDNS 裸 IP 直连腾讯 CDN，且具有严格 SSL Pinning 证书锁定；
-        # 伪造自签证书必然握手失败导致客户端超时等待（转圈 5-10 秒）。
-        # 因此凡属于企业微信自身进程（wxwork.exe / wxdrive）连接的裸 IP，或腾讯图片 CDN IP 与域名，一律放行纯 TCP 隧道透传！
-        # （注：微信/企微小程序运行于独立的 WeChatAppEx.exe / WXWorkWeb.exe，且请求业务域名，绝不使用腾讯裸 IP，故抓包 100% 正常不受任何影响）
-        proc_lower = (process_name or "").lower()
-        is_wx_sender = any(x in proc_lower for x in ("wxwork.exe", "wxdrive_x64.exe", "wxdrive.exe"))
-        is_tencent_ip = _is_ip_address(h) and any(h.startswith(p) for p in (
-            "183.47.", "180.111.", "117.62.", "175.4.", "119.147.",
-            "43.130.", "43.146.", "49.51.", "129.226.", "150.109."
-        ))
-        is_pinned_domain = any(h == d or h.endswith("." + d) for d in ("file.weixin.qq.com", "wxwork.file.weixin.qq.com", "qpic.cn", "res.wx.qq.com", "wechat.com"))
-
-        if (is_wx_sender and _is_ip_address(h)) or is_tencent_ip or is_pinned_domain:
-            # 除非用户在界面上明确单独添加了该精准 IP 或完整域名规则，否则全局通配模式下直接放行透传
-            if h not in self.capture_rules and not any(h.endswith("." + r.lstrip("*.")) for r in self.capture_rules if r != "*"):
-                return False
-
         # 检查是否直接命中抓包目标（包括 IP 已映射到目标域名的情况）
         if self.is_target_captured(h):
             return True
@@ -1653,8 +1616,6 @@ class CharlesProxyEngine:
         # HTTPDNS 客户端（如雷神客户端）发起的 HTTPS 连接没有 SNI 域名。
         # 允许探测性解密（Probe MITM），在解密首包读取 Host 头后再进行精准域名匹配与绑定！
         if allow_ip_probe and _is_ip_address(h):
-            if is_wx_sender or is_tencent_ip:
-                return False
             return True
 
         return False
@@ -1840,13 +1801,7 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                 else:
                     # 若属于后台白名单进程或未启用解密的域名，直接通过豁免端口段透传到目标域名/IP
                     exe_clean = proc_name[2:].strip().lower() if proc_name.startswith("💻 ") else ""
-                    is_pinned_domain = any(host == d or host.endswith("." + d) for d in ("file.weixin.qq.com", "wxwork.file.weixin.qq.com", "qpic.cn", "res.wx.qq.com", "wechat.com"))
-                    is_wx_sender = any(x in exe_clean for x in ("wxwork.exe", "wxdrive_x64.exe", "wxdrive.exe"))
-                    is_tencent_ip = _is_ip_address(host) and (is_wx_sender or any(host.startswith(p) for p in (
-                        "183.47.", "180.111.", "117.62.", "175.4.", "119.147.",
-                        "43.130.", "43.146.", "49.51.", "129.226.", "150.109."
-                    )))
-                    if exe_clean in _BYPASS_EXE_NAMES or is_pinned_domain or is_tencent_ip:
+                    if exe_clean in _BYPASS_EXE_NAMES:
                         self._bridge_raw_socket(client_sock, host, port)
                     else:
                         self._handle_connect_tunnel(
