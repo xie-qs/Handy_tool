@@ -57,9 +57,19 @@ _SELF_PID = os.getpid()
 _PROXY_OUTBOUND_PORTS: set[int] = set()
 _OUTBOUND_LOCK = threading.Lock()
 
-# 不对其做透明流量劫持的底层系统/加速通道/开发工具进程白名单（防止回环且不影响加速器隧道本身）
+# 不对其做透明流量劫持的底层系统/加速通道/开发工具/企业微信进程白名单（仅排除企业微信，绝不排除普通微信与微信小程序）
 _BYPASS_EXE_NAMES: set[str] = {
     "xptool.exe",
+    "wxwork.exe",
+    "wxworkweb.exe",
+    "wxdrive_x64.exe",
+    "wxdrive.exe",
+    "wxworktpplayer.exe",
+    "wxworkhelper.exe",
+    "wework.exe",
+    "wecom-agent.exe",
+    "wemail.exe",
+    "wemailnode_x64.exe",
     "httpdebuggersvc.exe",
     "httpdebuggerui.exe",
     "httpdebuggerui_cn.exe",
@@ -109,7 +119,7 @@ def _create_outbound_socket(host: str, port: int, timeout: float = 15.0) -> sock
     last_err = None
     for res in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM):
         af, socktype, proto, _, sa = res
-        for _ in range(40):
+        for _ in range(120):
             s = None
             try:
                 s = socket.socket(af, socktype, proto)
@@ -127,6 +137,17 @@ def _create_outbound_socket(host: str, port: int, timeout: float = 15.0) -> sock
                     continue
                 s.connect(sa)
                 return s
+            except OSError as e:
+                last_err = e
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                # 若 connect 时该源端口与目标地址的四元组处于 TIME_WAIT (WinError 10048/10013)，继续尝试下一个端口
+                if getattr(e, "winerror", 0) in (10048, 10013) or getattr(e, "errno", 0) in (10048, 10013):
+                    continue
+                break
             except Exception as e:
                 last_err = e
                 if s is not None:
@@ -175,32 +196,55 @@ def _get_exe_name_by_pid(pid: int) -> str:
     return name
 
 
+# 仅针对企业微信 (WXWork) 专属域名后缀免除 MITM 假证书（绝不包含 servicewechat.com / qpic.cn 等微信小程序域名）
+_WXWORK_BYPASS_DOMAIN_SUFFIXES = (
+    "work.weixin.qq.com",
+    "wework.cn",
+    "wework.qpic.cn",
+)
+
+
+def _is_tencent_bypass_domain(host: str) -> bool:
+    h = (host or "").split(":")[0].strip().lower()
+    if not h:
+        return False
+    for suf in _WXWORK_BYPASS_DOMAIN_SUFFIXES:
+        if h == suf or h.endswith("." + suf):
+            return True
+    return False
+
+
 def _resolve_pid_and_exe_by_port(client_port: int) -> tuple[int, str]:
     """根据本机 TCP 源端口查询所属 (PID, 进程名.exe)"""
     if sys.platform != "win32" or not client_port:
         return 0, ""
     try:
         iphlpapi = ctypes.windll.iphlpapi
-        size = wt.DWORD(0)
-        iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 4, 0)
-        if size.value <= 0:
-            return 0, ""
-        buf = ctypes.create_string_buffer(size.value)
-        if iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 4, 0) != 0:
-            return 0, ""
-        num_entries = struct.unpack_from("<I", buf, 0)[0]
+        target_net_port = socket.htons(int(client_port)) & 0xFFFF
         row_size = ctypes.sizeof(_MIB_TCPROW_OWNER_PID)
-        offset = 4
-        target_net_port = socket.htons(int(client_port))
-        for _ in range(num_entries):
-            if offset + row_size > size.value:
-                break
-            row = _MIB_TCPROW_OWNER_PID.from_buffer_copy(buf, offset)
-            offset += row_size
-            if row.dwLocalPort == target_net_port:
-                pid = int(row.dwOwningPid)
-                exe = _get_exe_name_by_pid(pid)
-                return pid, exe
+        # 5 = TCP_TABLE_OWNER_PID_ALL (包含刚 bind 尚未完成握手的 SYN 连接及所有活动连接)
+        for tbl_class in (5, 4):
+            size = wt.DWORD(0)
+            iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, tbl_class, 0)
+            if size.value <= 0:
+                continue
+            alloc_size = size.value + 8192
+            size = wt.DWORD(alloc_size)
+            buf = ctypes.create_string_buffer(alloc_size)
+            if iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, tbl_class, 0) != 0:
+                continue
+            num_entries = struct.unpack_from("<I", buf, 0)[0]
+            offset = 4
+            limit = min(alloc_size, size.value)
+            for _ in range(num_entries):
+                if offset + row_size > limit:
+                    break
+                row = _MIB_TCPROW_OWNER_PID.from_buffer_copy(buf, offset)
+                offset += row_size
+                if (row.dwLocalPort & 0xFFFF) == target_net_port and row.dwOwningPid:
+                    pid = int(row.dwOwningPid)
+                    exe = _get_exe_name_by_pid(pid)
+                    return pid, exe
     except Exception:
         pass
     return 0, ""
@@ -273,7 +317,7 @@ class WinDivertTransparentRedirector:
     """
     类似 HTTP Debugger / Proxifier 的 Windows 驱动级透明 TCP 流量劫持器：
     将本机应用程序（如雷神客户端 leigod.exe、微信小程序 WeChatAppEx.exe 等不走系统代理的软件）
-    发往外网 80/443/8080/8443（或本地透明网关 10091）的 TCP 连接，透明重定向到本地抓包端口。
+    发往外网 80/443（或本地透明网关 10091）的 TCP 连接，透明重定向到本地抓包端口。
     """
 
     def __init__(self):
@@ -348,11 +392,12 @@ class WinDivertTransparentRedirector:
         if not self.dll:
             return False, "未找到 WinDivert.dll 驱动组件"
         self.proxy_port = int(proxy_port)
+        # 保持原版拦截范围（兼容微信小程序与 xptool 加速器），仅豁免 8080 端口（企业微信 gap.work.weixin.qq.com:8080 主信令长连接）
         flt = (
             f"outbound and ip and tcp "
             f"and (tcp.SrcPort < {_OUTBOUND_PORT_MIN} or tcp.SrcPort > {_OUTBOUND_PORT_MAX}) "
             f"and (tcp.DstPort < {_OUTBOUND_PORT_MIN} or tcp.DstPort > {_OUTBOUND_PORT_MAX}) "
-            f"and (tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.DstPort == 8080 or tcp.DstPort == 8443 "
+            f"and (tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.DstPort == 8443 "
             f"or tcp.DstPort == 10091 or tcp.SrcPort == {self.proxy_port})"
         ).encode("ascii")
         h = self.dll.WinDivertOpen(flt, 0, 0, 0)
@@ -389,45 +434,48 @@ class WinDivertTransparentRedirector:
         _, orig_dst_ip_b, orig_dst_port, proc_label, _ = item
         return socket.inet_ntoa(orig_dst_ip_b), orig_dst_port, proc_label
 
-    def _check_port_action(self, src_port: int, tcp_flags: int) -> str:
-        """返回 'divert' (透明劫持到代理)、'reset' (重置抓包前遗留的旧 Keep-Alive 连接以触发重连) 或 'pass' (直通)"""
+    def _check_port_action(self, src_port: int, tcp_flags: int) -> tuple[str, str]:
+        """返回 (action, exe_name)"""
         if _OUTBOUND_PORT_MIN <= src_port <= _OUTBOUND_PORT_MAX:
-            return "pass"
+            return "pass", ""
         with _OUTBOUND_LOCK:
             if src_port in _PROXY_OUTBOUND_PORTS:
-                return "pass"
-        with self._lock:
-            if src_port in self.nat_table:
-                return "divert"
-            if src_port in self.bypass_ports:
-                return "pass"
+                return "pass", ""
+
+        is_syn = (tcp_flags & 0x02) != 0 and (tcp_flags & 0x10) == 0
+        if not is_syn:
+            with self._lock:
+                if src_port in self.nat_table:
+                    return "divert", ""
+                if src_port in self.bypass_ports:
+                    return "pass", ""
 
         pid, exe = _resolve_pid_and_exe_by_port(src_port)
         if pid == _SELF_PID:
             with _OUTBOUND_LOCK:
                 _PROXY_OUTBOUND_PORTS.add(src_port)
             with self._lock:
+                self.nat_table.pop(src_port, None)
                 self.bypass_ports.add(src_port)
-            return "pass"
+            return "pass", exe
 
-        is_syn = (tcp_flags & 0x02) != 0 and (tcp_flags & 0x10) == 0
-        if is_syn:
-            return "divert"
-
-        # 对于抓包开启前就已经建立的旧连接：若属于后台白名单进程，直接放行直通
         exe_lower = (exe or "").lower()
+        # 若明确属于企业微信等白名单进程，无论是新连接(SYN)还是旧连接，一律清理旧 nat_table 并在内核层直通放行
         if exe_lower in _BYPASS_EXE_NAMES:
             with self._lock:
+                self.nat_table.pop(src_port, None)
                 self.bypass_ports.add(src_port)
-            return "pass"
+            return "pass", exe
 
-        # 若是未能识别出具体 exe 的临时端口，先不直接加入永久直通 bypass_ports，避免浏览器快速重连时被穿透
-        if not exe_lower or exe_lower.startswith("pid:"):
-            return "pass"
+        if is_syn:
+            with self._lock:
+                self.bypass_ports.discard(src_port)
+            return "divert", exe
 
-        if (tcp_flags & 0x04) != 0:  # 已经是 RST 包
-            return "pass"
-        return "reset"
+        # 抓包开启前已存在的旧连接：保留直通，不注入 RST 破坏企业微信存量连接
+        with self._lock:
+            self.bypass_ports.add(src_port)
+        return "pass", exe
 
     def _packet_loop(self):
         buf = (ctypes.c_uint8 * 65535)()
@@ -477,12 +525,12 @@ class WinDivertTransparentRedirector:
                         addr.Flags &= ~0x20000  # Outbound = 0 (Inbound)
                     modified = True
             elif dst_port != p_port:
-                action = self._check_port_action(src_port, tcp_flags)
+                action, exe = self._check_port_action(src_port, tcp_flags)
                 if action == "divert":
                     now = time.time()
+                    is_syn = (tcp_flags & 0x02) != 0 and (tcp_flags & 0x10) == 0
                     with self._lock:
-                        if src_port not in self.nat_table:
-                            _, exe = _resolve_pid_and_exe_by_port(src_port)
+                        if is_syn or src_port not in self.nat_table:
                             proc_label = f"💻 {exe}" if exe else "💻 本机程序"
                             self.nat_table[src_port] = (src_ip, dst_ip, dst_port, proc_label, now)
                         else:
@@ -502,27 +550,6 @@ class WinDivertTransparentRedirector:
                     if not is_loopback:
                         addr.Flags &= ~0x20000  # Outbound = 0 (Inbound)
                     modified = True
-                elif action == "reset":
-                    # 向客户端注入一个 TCP RST+ACK 包，促使客户端释放抓包前的旧 Keep-Alive 连接并立即重连进入代理
-                    seq_num, ack_num = struct.unpack("!II", raw[ihl + 4 : ihl + 12])
-                    tcphl = ((raw[ihl + 12] >> 4) & 0x0F) * 4
-                    payload_len = max(1, n - ihl - tcphl)
-                    rst_pkt = bytearray(40)
-                    rst_pkt[0] = 0x45
-                    struct.pack_into("!H", rst_pkt, 2, 40)
-                    rst_pkt[8] = 64
-                    rst_pkt[9] = 6  # TCP
-                    rst_pkt[12:16] = dst_ip
-                    rst_pkt[16:20] = src_ip
-                    struct.pack_into("!HHII", rst_pkt, 20, dst_port, src_port, ack_num, (seq_num + payload_len) & 0xFFFFFFFF)
-                    rst_pkt[32] = 0x50
-                    rst_pkt[33] = 0x14  # RST | ACK
-                    if not is_loopback:
-                        addr.Flags &= ~0x20000
-                    ctypes.memmove(buf, bytes(rst_pkt), 40)
-                    self.dll.WinDivertHelperCalcChecksums(ctypes.byref(buf), 40, ctypes.byref(addr), 0)
-                    self.dll.WinDivertSend(self.handle, ctypes.byref(buf), 40, ctypes.byref(send_len), ctypes.byref(addr))
-                    continue
 
             if modified:
                 ctypes.memmove(buf, bytes(raw), n)
@@ -534,11 +561,12 @@ _GLOBAL_DIVERT = WinDivertTransparentRedirector()
 
 
 def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str]:
-    """开启或关闭 Windows 电脑程序抓包（同时启动 WinDivert 驱动透明劫持 + WinINet 系统代理）"""
+    """开启或关闭 Windows 电脑程序抓包（优先使用类 HTTP Debugger 的纯 WinDivert 驱动透明劫持，不污染注册表系统代理）"""
     global _WIN_PROXY_ACTIVE
     if sys.platform != "win32":
         return False, "当前非 Windows 系统"
     divert_msg = ""
+    ok_d = False
     try:
         if enable:
             ok_d, msg_d = _GLOBAL_DIVERT.start(proxy_port=port)
@@ -552,6 +580,8 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
         import winreg
         reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
+            # 恢复开启系统代理（确保微信小程序 WeChatAppEx.exe 与浏览器 100% 正常启动并抓包），
+            # 同时将企业微信域名加入系统级 ProxyOverride 绕过列表，配合代理层白名单双重保障企业微信发图直通！
             if enable:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
@@ -560,7 +590,7 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
                     "ProxyOverride",
                     0,
                     winreg.REG_SZ,
-                    "localhost;127.0.0.1;<local>",
+                    "localhost;127.0.0.1;*.work.weixin.qq.com;*.wework.cn;wework.qpic.cn;182.254.116.117;182.254.118.119;<local>",
                 )
                 _WIN_PROXY_ACTIVE = True
             else:
@@ -580,7 +610,7 @@ def _set_windows_system_proxy(enable: bool, port: int = 8888) -> tuple[bool, str
 
 def check_and_restore_residual_proxy(default_port: int = 8888) -> tuple[bool, str]:
     """
-    启动防呆自检：检测 Windows 注册表系统代理是否残留指向本地抓包端口（如 127.0.0.1:8888）。
+    启动防呆自检：检测 Windows 注册表系统代理是否残留指向本地抓包端口（如 127.0.0.1:8888 / 8899）。
     如果发现残留（通常因上次程序被任务管理器强杀、崩溃或断电所致），自动重置为直连模式，防止电脑持续断网。
     返回: (是否执行了修复, 说明信息)
     """
@@ -599,17 +629,22 @@ def check_and_restore_residual_proxy(default_port: int = 8888) -> tuple[bool, st
             except Exception:
                 server = ""
 
-        # 仅当代理处于开启状态，且明确指向 8888 端口（或 127.0.0.1:8888）时触发自动安全重置，避免误动用户自设的外部代理
-        if enabled == 1 and (f":{default_port}" in str(server) or "127.0.0.1:8888" in str(server)):
+        srv_str = str(server or "")
+        is_local_residual = any(
+            f"127.0.0.1:{p}" in srv_str or f"localhost:{p}" in srv_str
+            for p in (default_port, 8888, 8899, 8898, 9888, 18888, 8880, 8889)
+        )
+        if is_local_residual and (enabled == 1 or srv_str):
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "")
             try:
                 wininet = ctypes.windll.wininet
                 wininet.InternetSetOptionW(0, 39, 0, 0)
                 wininet.InternetSetOptionW(0, 37, 0, 0)
             except Exception:
                 pass
-            return True, f"检测到上次异常退出残留的本地系统代理 ({server})，已自动为您安全重置，电脑网络已恢复正常！"
+            return True, f"检测到上次残留的本地代理配置 ({srv_str})，已自动为您安全清理，电脑网络已恢复正常！"
         return False, "系统网络正常"
     except Exception as e:
         return False, f"自检代理失败: {e}"
@@ -1150,9 +1185,10 @@ def _read_http_message(sock: socket.socket, is_request: bool = True):
 
     raw_headers_bytes = b"".join(header_lines)
 
-    # 判断是否有 Body
+    # 判断是否有 Body 及 Expect: 100-continue
     transfer_encoding = ""
     content_length = None
+    expect_continue = False
     for k, v in headers.items():
         kl = k.lower()
         if kl == "transfer-encoding":
@@ -1162,6 +1198,14 @@ def _read_http_message(sock: socket.socket, is_request: bool = True):
                 content_length = int(v.strip())
             except ValueError:
                 pass
+        elif kl == "expect" and "100-continue" in v.lower():
+            expect_continue = True
+
+    if is_request and expect_continue:
+        try:
+            sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+        except Exception:
+            pass
 
     if is_request and content_length is None and "chunked" not in transfer_encoding:
         return first_line, headers, raw_headers_bytes, b"", b""
@@ -1664,20 +1708,24 @@ class CharlesProxyEngine:
         h = host.split(":")[0].strip().lower()
         if not h:
             return False
+        exe_part = ""
         if process_name.startswith("💻 "):
             exe_part = process_name[2:].strip().lower()
             if exe_part in _BYPASS_EXE_NAMES:
                 return False
         if h in self.tls_passthrough_hosts:
             return False
+        # 腾讯/企微/微信专属域名与 HTTPDNS IP（如 oss.work.weixin.qq.com、i.work.weixin.qq.com、wework.qpic.cn 等）
+        # 除非用户显式将该具体域名加入 capture_rules，否则一律不签发自签名假证书，100% 走原始 TLS 隧道透传！
+        if _is_tencent_bypass_domain(h) and h not in self.capture_rules:
+            return False
 
         # 检查是否直接命中抓包目标（包括 IP 已映射到目标域名的情况）
         if self.is_target_captured(h):
             return True
 
-        # 若是纯 IP 且来源非系统内置旁路进程：
-        # HTTPDNS 客户端（如雷神客户端）发起的 HTTPS 连接没有 SNI 域名。
-        # 允许探测性解密（Probe MITM），在解密首包读取 Host 头后再进行精准域名匹配与绑定！
+        # 若是纯 IP 且来源非系统内置旁路进程（如雷神客户端 HTTPDNS 直连 IP）：
+        # 恢复原版探测性解密逻辑，但排除企业微信进程
         if allow_ip_probe and _is_ip_address(h):
             return True
 
@@ -1788,20 +1836,20 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
         client_sock.sendall(resp)
 
     def _bridge_raw_socket(self, client_sock: socket.socket, dst_ip: str, dst_port: int):
-        """对非 HTTP / 非标准 TLS 的私有二进制协议连接直接透传回原始目标，确保游戏隧道/微信长连接不断线"""
+        """对白名单进程或非 HTTP / 非标准 TLS 的私有二进制协议连接直接透传回原始目标，确保企业微信发图/游戏隧道不断线"""
         if not dst_ip or not dst_port or dst_port == self.port:
             return
         upstream = None
         try:
-            upstream = _create_outbound_socket(dst_ip, dst_port, timeout=8)
+            upstream = _create_outbound_socket(dst_ip, dst_port, timeout=12)
             sockets = [client_sock, upstream]
             while self.running:
-                rlist, _, xlist = select.select(sockets, [], sockets, 15)
+                rlist, _, xlist = select.select(sockets, [], sockets, 60)
                 if xlist or not rlist:
                     break
                 eof = False
                 for s in rlist:
-                    data = s.recv(32768)
+                    data = s.recv(65536)
                     if not data:
                         eof = True
                         break
@@ -1824,9 +1872,25 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
         nat_info = _GLOBAL_DIVERT.get_nat_info(client_addr[1])
         if nat_info:
             orig_dst_ip, orig_dst_port, proc_name = nat_info
+            # 若 SYN 瞬间尚未解析出具体 .exe，在 ESTABLISHED 后直接按源端口补查本机 PID（注意此时 client_addr[0] 是伪装的远端 IP，不可用 _resolve_client_process_name）
+            if not proc_name or proc_name == "💻 本机程序" or proc_name.lower().startswith("💻 pid:"):
+                _, exe = _resolve_pid_and_exe_by_port(client_addr[1])
+                proc_name = f"💻 {exe}" if exe else "💻 本机程序"
         else:
             orig_dst_ip, orig_dst_port = "", 0
             proc_name = _resolve_client_process_name(client_addr[0], client_addr[1])
+
+        exe_clean = proc_name[2:].strip().lower() if proc_name.startswith("💻 ") else ""
+        # 若该连接来自企业微信等白名单进程且带有原始目标地址，不嗅探、不解析、不抓包，直接 100% 原始 TCP 透传
+        if exe_clean in _BYPASS_EXE_NAMES and orig_dst_ip and orig_dst_port:
+            try:
+                self._bridge_raw_socket(client_sock, orig_dst_ip, orig_dst_port)
+            finally:
+                try:
+                    client_sock.close()
+                except Exception:
+                    pass
+            return
 
         try:
             # 先通过 MSG_PEEK 嗅探首包：区分 1) 原生 TLS ClientHello (0x16) 2) HTTP/CONNECT 3) 私有二进制协议
@@ -1864,8 +1928,8 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                 else:
                     # 若属于后台白名单进程或未启用解密的域名，直接通过豁免端口段透传到目标域名/IP
                     exe_clean = proc_name[2:].strip().lower() if proc_name.startswith("💻 ") else ""
-                    if exe_clean in _BYPASS_EXE_NAMES:
-                        self._bridge_raw_socket(client_sock, host, port)
+                    if exe_clean in _BYPASS_EXE_NAMES or _is_tencent_bypass_domain(host):
+                        self._bridge_raw_socket(client_sock, orig_dst_ip or host, port)
                     else:
                         self._handle_connect_tunnel(
                             client_sock,
@@ -1874,6 +1938,8 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                             port,
                             {"Host": f"{host}:{port}"},
                             proc_name,
+                            connect_ip=orig_dst_ip,
+                            connect_port=port,
                         )
                 return
 
@@ -1910,72 +1976,116 @@ ol{text-align:left;line-height:1.8;font-size:14px;color:#A9B7C6;}
                 # 通知客户端连接已建立
                 client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
-                if self.should_mitm_host(host, proc_name):
-                    self._handle_https_mitm(client_sock, client_ip, host, port, req_headers, proc_name, orig_dst_ip=orig_dst_ip)
-                else:
-                    self._handle_connect_tunnel(client_sock, client_ip, host, port, req_headers, proc_name)
-                return
+                if exe_clean in _BYPASS_EXE_NAMES or _is_tencent_bypass_domain(host):
+                    self._bridge_raw_socket(client_sock, host, port)
+                    return
 
-            # 2. 处理普通明文 HTTP 请求或在线证书下载门户
-            host_header = ""
-            for k, v in req_headers.items():
-                if k.lower() == "host":
-                    host_header = v.strip()
-                    break
-
-            if target.startswith("http://") or target.startswith("https://"):
-                parsed = urllib.parse.urlsplit(target)
-                scheme = parsed.scheme or "http"
-                host = parsed.hostname or host_header.split(":")[0]
-                port = parsed.port or (443 if scheme == "https" else 80)
-                path = parsed.path or "/"
-                if parsed.query:
-                    path += "?" + parsed.query
-            else:
-                scheme = "http"
-                if ":" in host_header:
-                    host, p_str = host_header.rsplit(":", 1)
+                # 若 CONNECT 目标是纯 IP，通过 MSG_PEEK 嗅探客户端紧接着发来的首包：
+                # 1) 若非 TLS 握手 (0x16)，说明是 MMTLS 等私有协议，直接走隧道透传
+                # 2) 若是 TLS 握手且带有明文 SNI (如 oss.work.weixin.qq.com)，用真实 SNI 域名判断是否需要 MITM 解密，避免对企微纯 IP 误做探测解密
+                check_host = host
+                connect_ip = orig_dst_ip or (host if _is_ip_address(host) else "")
+                if _is_ip_address(host):
                     try:
-                        port = int(p_str)
-                    except ValueError:
-                        port = 80
-                else:
-                    host, port = host_header, 80
-                path = target
+                        c_peek = client_sock.recv(4096, socket.MSG_PEEK)
+                        if c_peek:
+                            if c_peek[0] != 0x16:
+                                self._handle_connect_tunnel(
+                                    client_sock, client_ip, host, port, req_headers, proc_name, connect_ip=connect_ip, connect_port=port
+                                )
+                                return
+                            sni = _parse_sni_from_tls_client_hello(c_peek)
+                            if sni:
+                                check_host = sni
+                    except Exception:
+                        pass
 
-            # 检查是否访问内置证书安装页面
-            if host in ("yyds.ca", "chls.pro", "127.0.0.1", "localhost") or (
-                port == self.port and path in ("/", "/ssl", "/ca.crt", "/liuzu_yyds_ca.crt")
-            ):
-                self._serve_cert_portal(client_sock, path)
+                if self.should_mitm_host(check_host, proc_name):
+                    self._handle_https_mitm(client_sock, client_ip, check_host, port, req_headers, proc_name, orig_dst_ip=connect_ip)
+                else:
+                    self._handle_connect_tunnel(
+                        client_sock, client_ip, check_host, port, req_headers, proc_name, connect_ip=connect_ip, connect_port=port
+                    )
                 return
 
-            actual_server_ip = orig_dst_ip or (host if _is_ip_address(host) else "")
-            display_host = host
-            clean_hdr_host = host_header.split(":")[0].strip()
-            if _is_ip_address(host) and clean_hdr_host and not _is_ip_address(clean_hdr_host):
-                display_host = clean_hdr_host
-                if actual_server_ip:
-                    self.ip_mapper.record(actual_server_ip, clean_hdr_host)
+            # 2. 处理普通明文 HTTP 请求或在线证书下载门户（支持 Keep-Alive 多分片长连接复用）
+            while self.running:
+                host_header = ""
+                for k, v in req_headers.items():
+                    if k.lower() == "host":
+                        host_header = v.strip()
+                        break
 
-            should_record = self.is_target_captured(display_host) or not self.capture_rules
+                if target.startswith("http://") or target.startswith("https://"):
+                    parsed = urllib.parse.urlsplit(target)
+                    scheme = parsed.scheme or "http"
+                    host = parsed.hostname or host_header.split(":")[0]
+                    port = parsed.port or (443 if scheme == "https" else 80)
+                    path = parsed.path or "/"
+                    if parsed.query:
+                        path += "?" + parsed.query
+                else:
+                    scheme = "http"
+                    if ":" in host_header:
+                        host, p_str = host_header.rsplit(":", 1)
+                        try:
+                            port = int(p_str)
+                        except ValueError:
+                            port = 80
+                    else:
+                        host, port = host_header, 80
+                    path = target
 
-            self._forward_http_exchange(
-                client_sock=client_sock,
-                client_ip=client_ip,
-                scheme=scheme,
-                method=method,
-                host=display_host,
-                port=port,
-                path=path,
-                version=version,
-                req_headers=req_headers,
-                req_body=req_body,
-                use_tls=False,
-                process_name=proc_name,
-                server_ip=actual_server_ip,
-                should_record_flow=should_record,
-            )
+                # 检查是否访问内置证书安装页面
+                if host in ("yyds.ca", "chls.pro", "127.0.0.1", "localhost") or (
+                    port == self.port and path in ("/", "/ssl", "/ca.crt", "/liuzu_yyds_ca.crt")
+                ):
+                    self._serve_cert_portal(client_sock, path)
+                    return
+
+                actual_server_ip = orig_dst_ip or (host if _is_ip_address(host) else "")
+                display_host = host
+                clean_hdr_host = host_header.split(":")[0].strip()
+                if _is_ip_address(host) and clean_hdr_host and not _is_ip_address(clean_hdr_host):
+                    display_host = clean_hdr_host
+                    if actual_server_ip:
+                        self.ip_mapper.record(actual_server_ip, clean_hdr_host)
+
+                should_record = (
+                    (exe_clean not in _BYPASS_EXE_NAMES)
+                    and not (_is_tencent_bypass_domain(display_host) and display_host not in self.capture_rules)
+                    and (self.is_target_captured(display_host) or not self.capture_rules)
+                )
+
+                keep_going = self._forward_http_exchange(
+                    client_sock=client_sock,
+                    client_ip=client_ip,
+                    scheme=scheme,
+                    method=method,
+                    host=display_host,
+                    port=port,
+                    path=path,
+                    version=version,
+                    req_headers=req_headers,
+                    req_body=req_body,
+                    use_tls=False,
+                    process_name=proc_name,
+                    server_ip=actual_server_ip,
+                    should_record_flow=should_record,
+                )
+                if not keep_going:
+                    break
+                next_msg = _read_http_message(client_sock, is_request=True)
+                if not next_msg:
+                    break
+                first_line, req_headers, raw_req_headers, req_body, _ = next_msg
+                parts = first_line.split(None, 2)
+                if len(parts) < 2:
+                    break
+                method, target = parts[0].upper(), parts[1]
+                version = parts[2] if len(parts) > 2 else "HTTP/1.1"
+                if method == "CONNECT":
+                    break
         except Exception:
             pass
         finally:
@@ -3004,9 +3114,20 @@ class CharlesCaptureWindow:
         register_local_pc_ip(self.pc_ip)
         ok, msg = self.engine.start(port=port, mitm_enabled=self.mitm_var.get())
         if not ok:
+            # 若首选端口（如 8888）被企业微信等本机程序临时占用，自动顺延寻找可用端口
+            for alt_port in (8899, 8898, 9888, 18888, 8880, 8889):
+                if alt_port == port:
+                    continue
+                ok_alt, msg_alt = self.engine.start(port=alt_port, mitm_enabled=self.mitm_var.get())
+                if ok_alt:
+                    port = alt_port
+                    self.port_var.set(str(alt_port))
+                    ok, msg = True, msg_alt
+                    break
+        if not ok:
             messagebox.showerror(
                 "启动代理失败",
-                f"无法监听端口 {port}：\n{msg}\n\n请检查该端口是否被 Charles / Fiddler 等其他程序占用，或换个端口（如 8889）。",
+                f"无法监听端口 {port}：\n{msg}\n\n请检查该端口是否被其他程序占用，或换个端口（如 9888）。",
                 parent=self.win,
             )
             return
