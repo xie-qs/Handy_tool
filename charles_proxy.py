@@ -2791,6 +2791,12 @@ class CharlesCaptureWindow:
         )
         self.btn_rules.pack(side=tk.LEFT, padx=2)
 
+        ttk.Button(
+            top_bar,
+            text="🚀 接口调试",
+            style="Primary.TButton",
+            command=lambda: self.open_compose_dialog(self.selected_flow),
+        ).pack(side=tk.LEFT, padx=2)
 
         ttk.Button(top_bar, text="🗑 清空", command=self.clear_flows).pack(side=tk.LEFT, padx=2)
 
@@ -3042,10 +3048,15 @@ class CharlesCaptureWindow:
             style="Primary.TButton",
             command=self.decrypt_selected_text,
         ).pack(side=tk.RIGHT, padx=(2, 4))
+        ttk.Button(
+            insp_bar,
+            text="🔍 搜索内容 (Ctrl+F)",
+            command=self.open_active_inspector_search,
+        ).pack(side=tk.RIGHT, padx=2)
 
         self.insp_title_label = ttk.Label(
             insp_bar,
-            text="📋 点击上方任意一条接口请求查看 Request / Response 详情",
+            text="📋 点击上方任意一条接口请求查看 Request / Response 详情 (按 Ctrl+F 可在入参/返回内容中搜索)",
             foreground="#56A8F5",
             font=("Microsoft YaHei UI", 9, "bold"),
         )
@@ -3059,12 +3070,16 @@ class CharlesCaptureWindow:
         self.txt_headers = self._create_inspector_tab("📋 Headers & 概览 (请求头/响应头)")
         self.txt_curl = self._create_inspector_tab("💻 cURL 命令")
 
+        # 主窗口全局绑定 Ctrl+F，方便随时呼出当前激活详情页的内容搜索框
+        self.win.bind("<Control-f>", self._on_main_ctrl_f)
+        self.win.bind("<Control-F>", self._on_main_ctrl_f)
+
         # 4. 底部状态栏
         status_bar = ttk.Frame(self.win, padding=(10, 4))
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_label = ttk.Label(
             status_bar,
-            text="💡 就绪：点击左上角「▶ 启动代理抓包」即可开始抓取手机 HTTP/HTTPS 请求（或点击「🧪 模拟接口请求」预览效果）",
+            text="💡 就绪：点击左上角「▶ 启动代理抓包」即可开始抓取手机 HTTP/HTTPS 请求（或点击「🚀 接口调试」发送请求）",
             foreground="#8C9099",
         )
         self.status_label.pack(side=tk.LEFT)
@@ -3091,7 +3106,228 @@ class CharlesCaptureWindow:
         yscroll.config(command=txt.yview)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt)
         return txt
+
+    def _attach_text_search(self, txt: tk.Text):
+        """为任意 tk.Text 控件挂载 Ctrl+F 浮动内容搜索条（支持高亮全部匹配、上/下一个跳转、区分大小写、Esc 关闭）"""
+        parent = txt.master
+        txt.tag_configure("find_match", background="#5C4813", foreground="#FFE082")
+        txt.tag_configure("find_current", background="#FF9800", foreground="#000000")
+
+        search_bar = tk.Frame(
+            parent,
+            bg="#2B2D30",
+            highlightthickness=1,
+            highlightbackground="#3574F0",
+            padx=6,
+            pady=3,
+        )
+        search_bar._is_open = False
+        matches: list[tuple[str, str]] = []
+        cur_idx = -1
+
+        tk.Label(
+            search_bar,
+            text="🔍",
+            bg="#2B2D30",
+            fg="#56A8F5",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.LEFT, padx=(0, 3))
+
+        search_var = tk.StringVar()
+        ent = tk.Entry(
+            search_bar,
+            textvariable=search_var,
+            width=22,
+            bg="#1E1F22",
+            fg="#DFE1E5",
+            insertbackground="#FFFFFF",
+            relief=tk.FLAT,
+            font=("Consolas", 9),
+            highlightthickness=1,
+            highlightbackground="#393B40",
+        )
+        ent.pack(side=tk.LEFT, padx=2, ipady=2)
+
+        cnt_lbl = tk.Label(
+            search_bar,
+            text="0/0",
+            width=7,
+            bg="#2B2D30",
+            fg="#8C9099",
+            font=("Consolas", 8),
+        )
+        cnt_lbl.pack(side=tk.LEFT, padx=3)
+
+        case_var = tk.BooleanVar(value=False)
+
+        def _highlight_current():
+            txt.tag_remove("find_current", "1.0", tk.END)
+            if not matches or cur_idx < 0 or cur_idx >= len(matches):
+                return
+            s_pos, e_pos = matches[cur_idx]
+            txt.tag_add("find_current", s_pos, e_pos)
+            txt.tag_raise("find_match")
+            txt.tag_raise("find_current")
+            txt.see(s_pos)
+            cnt_lbl.config(text=f"{cur_idx + 1}/{len(matches)}", fg="#73C991")
+
+        def _do_search(reset_index: bool = True):
+            nonlocal matches, cur_idx
+            txt.tag_remove("find_match", "1.0", tk.END)
+            txt.tag_remove("find_current", "1.0", tk.END)
+            matches = []
+            kw = search_var.get()
+            if not kw:
+                cur_idx = -1
+                cnt_lbl.config(text="0/0", fg="#8C9099")
+                return
+
+            pos = "1.0"
+            nocase = 0 if case_var.get() else 1
+            count_var = tk.IntVar()
+            while True:
+                idx = txt.search(kw, pos, stopindex=tk.END, nocase=nocase, count=count_var)
+                if not idx:
+                    break
+                match_len = count_var.get() or len(kw)
+                end_idx = f"{idx}+{match_len}c"
+                matches.append((idx, end_idx))
+                txt.tag_add("find_match", idx, end_idx)
+                pos = end_idx
+                if len(matches) >= 5000:
+                    break
+
+            if not matches:
+                cur_idx = -1
+                cnt_lbl.config(text="无匹配", fg="#FF6B68")
+                return
+
+            if reset_index or cur_idx < 0 or cur_idx >= len(matches):
+                cur_idx = 0
+            _highlight_current()
+
+        def _next_match(_event=None):
+            nonlocal cur_idx
+            if not matches:
+                _do_search(reset_index=True)
+                return "break"
+            cur_idx = (cur_idx + 1) % len(matches)
+            _highlight_current()
+            return "break"
+
+        def _prev_match(_event=None):
+            nonlocal cur_idx
+            if not matches:
+                _do_search(reset_index=True)
+                return "break"
+            cur_idx = (cur_idx - 1) % len(matches)
+            _highlight_current()
+            return "break"
+
+        def _close_search(_event=None):
+            search_bar._is_open = False
+            search_bar.place_forget()
+            txt.tag_remove("find_match", "1.0", tk.END)
+            txt.tag_remove("find_current", "1.0", tk.END)
+            txt.focus_set()
+            return "break"
+
+        def _open_search(_event=None):
+            search_bar._is_open = True
+            search_bar.place(relx=1.0, x=-22, y=6, anchor="ne")
+            search_bar.lift()
+            try:
+                sel = txt.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+                if sel and len(sel) <= 80 and "\n" not in sel:
+                    search_var.set(sel)
+            except tk.TclError:
+                pass
+            ent.focus_set()
+            ent.selection_range(0, tk.END)
+            _do_search(reset_index=True)
+            return "break"
+
+        tk.Button(
+            search_bar,
+            text="▲",
+            width=2,
+            bg="#393B40",
+            fg="#DFE1E5",
+            activebackground="#4E5254",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            bd=0,
+            command=_prev_match,
+        ).pack(side=tk.LEFT, padx=1)
+
+        tk.Button(
+            search_bar,
+            text="▼",
+            width=2,
+            bg="#393B40",
+            fg="#DFE1E5",
+            activebackground="#4E5254",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            bd=0,
+            command=_next_match,
+        ).pack(side=tk.LEFT, padx=1)
+
+        tk.Checkbutton(
+            search_bar,
+            text="Aa",
+            variable=case_var,
+            bg="#2B2D30",
+            fg="#A9B7C6",
+            selectcolor="#1E1F22",
+            activebackground="#2B2D30",
+            activeforeground="#FFFFFF",
+            font=("Consolas", 8, "bold"),
+            bd=0,
+            command=lambda: _do_search(reset_index=True),
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            search_bar,
+            text="✕",
+            width=2,
+            bg="#2B2D30",
+            fg="#8C9099",
+            activebackground="#C75450",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            bd=0,
+            command=_close_search,
+        ).pack(side=tk.LEFT, padx=(2, 0))
+
+        search_var.trace_add("write", lambda *_: _do_search(reset_index=True))
+        ent.bind("<Return>", _next_match)
+        ent.bind("<Shift-Return>", _prev_match)
+        ent.bind("<F3>", _next_match)
+        ent.bind("<Shift-F3>", _prev_match)
+        ent.bind("<Escape>", _close_search)
+        ent.bind("<Control-f>", _open_search)
+        ent.bind("<Control-F>", _open_search)
+
+        txt.bind("<Control-f>", _open_search)
+        txt.bind("<Control-F>", _open_search)
+        txt.bind("<Escape>", lambda e: _close_search(e) if search_bar._is_open else None)
+        txt._open_search_bar = _open_search
+        txt._refresh_search_bar = lambda: _do_search(reset_index=True) if search_bar._is_open else None
+
+    def open_active_inspector_search(self):
+        txt = self._get_active_inspector_text_widget()
+        if txt and hasattr(txt, "_open_search_bar"):
+            txt._open_search_bar()
+
+    def _on_main_ctrl_f(self, event=None):
+        focused = self.win.focus_get()
+        if isinstance(focused, tk.Text) and hasattr(focused, "_open_search_bar"):
+            return focused._open_search_bar()
+        self.open_active_inspector_search()
+        return "break"
 
     # -------------------- 代理启停与 ADB 自动挂载 --------------------
 
@@ -3723,7 +3959,7 @@ class CharlesCaptureWindow:
                 )
             menu.add_separator()
             menu.add_command(
-                label="🚀 编辑请求参数并立即重发 (Compose)...",
+                label="🚀 接口调试 (编辑请求并发送)...",
                 command=lambda: self.open_compose_dialog(flow),
             )
             menu.add_separator()
@@ -4060,6 +4296,11 @@ class CharlesCaptureWindow:
         # 4. cURL 命令
         self.txt_curl.delete("1.0", tk.END)
         self.txt_curl.insert("1.0", self._build_curl(flow))
+
+        # 若搜索框正处于打开状态，切换接口后自动刷新高亮匹配
+        for t_w in (self.txt_resp_body, self.txt_req_body, self.txt_headers, self.txt_curl):
+            if hasattr(t_w, "_refresh_search_bar"):
+                t_w._refresh_search_bar()
 
     def _build_curl(self, flow: HttpFlow) -> str:
         if flow.method == "CONNECT":
@@ -4521,6 +4762,7 @@ class CharlesCaptureWindow:
             "1.0",
             existing.fixed_req_body if (existing and existing.fixed_req_body) else orig_req_body,
         )
+        self._attach_text_search(txt_req_edit)
 
         # 3. 修改响应体参数区 (Response Body)
         sec_resp = tk.LabelFrame(
@@ -4571,6 +4813,7 @@ class CharlesCaptureWindow:
             "1.0",
             existing.fixed_resp_body if (existing and existing.fixed_resp_body) else orig_resp_body,
         )
+        self._attach_text_search(txt_resp_edit)
 
         # 底部保存/取消按钮
         btm = ttk.Frame(dlg)
@@ -4883,27 +5126,41 @@ class CharlesCaptureWindow:
 
         _reload()
 
-    def open_compose_dialog(self, flow: HttpFlow):
-        """编辑请求参数并立即重发一次请求 (类似 Charles Compose)"""
+    def open_compose_dialog(self, flow: HttpFlow | None = None):
+        """接口调试窗口：支持自定义构造 HTTP/HTTPS 请求、从当前抓包载入、从 cURL 导入、编辑 Headers/Params/Body、Ctrl+F 搜索及缩小/全屏切换"""
+        init_flow = flow if (flow and flow.method != "CONNECT") else None
+        if init_flow is None and self.selected_flow and self.selected_flow.method != "CONNECT":
+            init_flow = self.selected_flow
+
         dlg = tk.Toplevel(self.win)
-        dlg.title(f"🚀 编辑并重发请求 (Compose) — {flow.host}{flow.path}")
-        dlg.geometry("720x520")
+        title_suffix = f" — [{init_flow.method}] {init_flow.host}{_clean_api_path(init_flow.path)}" if init_flow else ""
+        dlg.title(f"🚀 接口调试 (HTTP/HTTPS 请求发送与调试器){title_suffix}")
+        dlg.geometry("940x740")
+        dlg.minsize(720, 500)
+        dlg.resizable(True, True)
+        # 注意：不设置 dlg.transient(self.win)，以保留 Windows 标题栏右上角原生的「最小化(缩小)」和「最大化(全屏)」按钮
         auto_fit_dialog(dlg)
         dlg.configure(bg="#2B2D30")
-        dlg.transient(self.win)
         self.app._apply_app_icon(dlg)
 
-        top_r = ttk.Frame(dlg)
-        top_r.pack(fill=tk.X, padx=12, pady=(10, 6))
-        m_var = tk.StringVar(value=flow.method)
-        ttk.Combobox(
+        # 1. 顶部地址栏：Method + URL + 发送按钮 + 缩小/全屏按钮
+        top_r = ttk.Frame(dlg, padding=(12, 10, 12, 4))
+        top_r.pack(fill=tk.X)
+
+        m_var = tk.StringVar(value=init_flow.method if init_flow else "GET")
+        method_cb = ttk.Combobox(
             top_r,
             textvariable=m_var,
-            values=["GET", "POST", "PUT", "DELETE", "PATCH"],
-            width=8,
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        url_var = tk.StringVar(value=flow.full_url)
-        tk.Entry(
+            values=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+            width=9,
+            state="readonly",
+            font=("Consolas", 10, "bold"),
+        )
+        method_cb.pack(side=tk.LEFT, padx=(0, 6))
+
+        default_url = init_flow.full_url if init_flow else "https://"
+        url_var = tk.StringVar(value=default_url)
+        url_entry = tk.Entry(
             top_r,
             textvariable=url_var,
             bg="#1E1F22",
@@ -4911,24 +5168,162 @@ class CharlesCaptureWindow:
             insertbackground="#FFFFFF",
             relief=tk.FLAT,
             font=("Consolas", 10),
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+            highlightthickness=1,
+            highlightbackground="#393B40",
+        )
+        url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8), ipady=4)
 
-        bar_b = ttk.Frame(dlg)
-        bar_b.pack(fill=tk.X, padx=12, pady=2)
-        ttk.Label(bar_b, text="📤 Request Body (可修改参数后重发):").pack(side=tk.LEFT)
+        # 窗口全屏/还原 & 缩小按钮
+        def _toggle_fullscreen(_event=None):
+            try:
+                if dlg.state() == "zoomed":
+                    dlg.state("normal")
+                    btn_full.config(text="🗖 全屏")
+                else:
+                    dlg.state("zoomed")
+                    btn_full.config(text="🗗 还原")
+            except Exception:
+                pass
+
+        def _shrink_or_minimize():
+            try:
+                if dlg.state() == "zoomed":
+                    dlg.state("normal")
+                    btn_full.config(text="🗖 全屏")
+                else:
+                    dlg.iconify()
+            except Exception:
+                pass
+
+        btn_full = ttk.Button(
+            top_r,
+            text="🗖 全屏",
+            command=_toggle_fullscreen,
+        )
+        btn_full.pack(side=tk.RIGHT, padx=(2, 0))
+
+        btn_shrink = ttk.Button(
+            top_r,
+            text="🗕 缩小",
+            command=_shrink_or_minimize,
+        )
+        btn_shrink.pack(side=tk.RIGHT, padx=2)
+
+        btn_send = ttk.Button(
+            top_r,
+            text="🚀 发送请求 (Ctrl+Enter)",
+            style="Primary.TButton",
+        )
+        btn_send.pack(side=tk.RIGHT, padx=(0, 4))
+
+        # 2. 快捷工具栏：载入选中抓包、粘贴导入 cURL、复制为 cURL、清空重置、同步到抓包列表开关
+        tool_r = ttk.Frame(dlg, padding=(12, 2, 12, 6))
+        tool_r.pack(fill=tk.X)
+
+        record_to_list_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            tool_r,
+            text="📌 同步记录到主抓包列表",
+            variable=record_to_list_var,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        # 3. 上下分栏 PanedWindow（上半部分：请求参数配置；下半部分：实时响应结果）
+        paned = tk.PanedWindow(dlg, orient=tk.VERTICAL, bg="#393B40", sashwidth=5, bd=0)
+        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        # -------------------- 3.1 上半区：请求构造器 (Body / Headers / Query) --------------------
+        req_frame = ttk.Frame(paned)
+        paned.add(req_frame, minsize=200, height=300)
+
+        req_nb = ttk.Notebook(req_frame)
+        req_nb.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1: Request Body
+        tab_body = tk.Frame(req_nb, bg="#2B2D30")
+        req_nb.add(tab_body, text="  📤 Body (请求体)  ")
+
+        body_bar = ttk.Frame(tab_body, padding=(6, 4))
+        body_bar.pack(fill=tk.X)
+        ttk.Label(body_bar, text="快捷类型:").pack(side=tk.LEFT, padx=(0, 4))
+
+        def _set_content_type(ct_val: str):
+            raw_h = txt_req_headers.get("1.0", tk.END).splitlines()
+            new_lines = []
+            found = False
+            for line in raw_h:
+                if line.strip().lower().startswith("content-type:"):
+                    new_lines.append(f"Content-Type: {ct_val}")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"Content-Type: {ct_val}")
+            txt_req_headers.delete("1.0", tk.END)
+            txt_req_headers.insert("1.0", "\n".join(new_lines).strip())
+            if m_var.get() == "GET":
+                m_var.set("POST")
+
         ttk.Button(
-            bar_b,
+            body_bar,
+            text="JSON",
+            command=lambda: _set_content_type("application/json; charset=utf-8"),
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            body_bar,
+            text="Form表单",
+            command=lambda: _set_content_type("application/x-www-form-urlencoded; charset=utf-8"),
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            body_bar,
+            text="Text",
+            command=lambda: _set_content_type("text/plain; charset=utf-8"),
+        ).pack(side=tk.LEFT, padx=2)
+
+        def _format_req_json():
+            raw = txt_req_body.get("1.0", tk.END).strip()
+            if not raw:
+                return
+            try:
+                obj = json.loads(raw)
+                txt_req_body.delete("1.0", tk.END)
+                txt_req_body.insert("1.0", json.dumps(obj, ensure_ascii=False, indent=2))
+            except Exception as e:
+                messagebox.showwarning("JSON 格式有误", f"无法格式化为 JSON：\n{e}", parent=dlg)
+
+        def _minify_req_json():
+            raw = txt_req_body.get("1.0", tk.END).strip()
+            if not raw:
+                return
+            try:
+                obj = json.loads(raw)
+                txt_req_body.delete("1.0", tk.END)
+                txt_req_body.insert("1.0", json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
+            except Exception as e:
+                messagebox.showwarning("JSON 格式有误", f"无法压缩 JSON：\n{e}", parent=dlg)
+
+        ttk.Button(
+            body_bar,
             text="🔒 加密选中",
-            command=lambda: self._encrypt_in_text_widget(txt_b, dlg),
+            command=lambda: self._encrypt_in_text_widget(txt_req_body, dlg),
         ).pack(side=tk.RIGHT, padx=2)
         ttk.Button(
-            bar_b,
+            body_bar,
             text="🔓 解密选中",
-            command=lambda: self._decrypt_in_text_widget(txt_b, dlg),
+            command=lambda: self._decrypt_in_text_widget(txt_req_body, dlg),
+        ).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(body_bar, text="🗜 压缩一行", command=_minify_req_json).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(body_bar, text="✨ 格式化 JSON", command=_format_req_json).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(
+            body_bar,
+            text="🔍 搜索 (Ctrl+F)",
+            command=lambda: txt_req_body._open_search_bar() if hasattr(txt_req_body, "_open_search_bar") else None,
         ).pack(side=tk.RIGHT, padx=2)
 
-        txt_b = tk.Text(
-            dlg,
+        body_edit_frame = tk.Frame(tab_body, bg="#1E1F22")
+        body_edit_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+        b_scroll = ttk.Scrollbar(body_edit_frame, orient=tk.VERTICAL)
+        txt_req_body = tk.Text(
+            body_edit_frame,
             bg="#1E1F22",
             fg="#DFE1E5",
             insertbackground="#FFFFFF",
@@ -4937,29 +5332,426 @@ class CharlesCaptureWindow:
             bd=0,
             padx=10,
             pady=8,
+            yscrollcommand=b_scroll.set,
         )
-        txt_b.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
-        txt_b.insert("1.0", flow.get_decoded_body(is_request=True))
+        b_scroll.config(command=txt_req_body.yview)
+        b_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_req_body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt_req_body)
 
-        def _do_send():
-            import urllib.request
+        # Tab 2: Request Headers
+        tab_headers = tk.Frame(req_nb, bg="#2B2D30")
+        req_nb.add(tab_headers, text="  📋 Headers (请求头)  ")
+
+        hdr_bar = ttk.Frame(tab_headers, padding=(6, 4))
+        hdr_bar.pack(fill=tk.X)
+        ttk.Label(
+            hdr_bar,
+            text="💡 每行一条 Header，格式为 Key: Value（如 Authorization: Bearer xxx，按 Ctrl+F 可搜索）",
+            foreground="#8C9099",
+        ).pack(side=tk.LEFT)
+
+        hdr_edit_frame = tk.Frame(tab_headers, bg="#1E1F22")
+        hdr_edit_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+        h_scroll = ttk.Scrollbar(hdr_edit_frame, orient=tk.VERTICAL)
+        txt_req_headers = tk.Text(
+            hdr_edit_frame,
+            bg="#1E1F22",
+            fg="#DFE1E5",
+            insertbackground="#FFFFFF",
+            selectbackground="#2E436E",
+            font=("Consolas", 10),
+            bd=0,
+            padx=10,
+            pady=8,
+            yscrollcommand=h_scroll.set,
+        )
+        h_scroll.config(command=txt_req_headers.yview)
+        h_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_req_headers.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt_req_headers)
+
+        # Tab 3: URL Query 参数
+        tab_query = tk.Frame(req_nb, bg="#2B2D30")
+        req_nb.add(tab_query, text="  🔗 Query 参数 (URL参数)  ")
+
+        q_bar = ttk.Frame(tab_query, padding=(6, 4))
+        q_bar.pack(fill=tk.X)
+        ttk.Label(
+            q_bar,
+            text="💡 每行一个参数 key=value，修改后可一键同步到上方 URL 地址栏",
+            foreground="#8C9099",
+        ).pack(side=tk.LEFT)
+
+        def _extract_query_from_url():
+            u = url_var.get().strip()
+            parsed = urllib.parse.urlsplit(u)
+            items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            txt_req_query.delete("1.0", tk.END)
+            if items:
+                txt_req_query.insert("1.0", "\n".join(f"{k}={v}" for k, v in items))
+
+        def _apply_query_to_url():
+            u = url_var.get().strip()
+            if not u:
+                return
+            parsed = urllib.parse.urlsplit(u)
+            pairs = []
+            for line in txt_req_query.get("1.0", tk.END).splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if "=" in s:
+                    k, v = s.split("=", 1)
+                    pairs.append((k.strip(), v.strip()))
+                else:
+                    pairs.append((s, ""))
+            new_query = urllib.parse.urlencode(pairs, doseq=True)
+            new_url = urllib.parse.urlunsplit(
+                (parsed.scheme or "https", parsed.netloc, parsed.path, new_query, parsed.fragment)
+            )
+            url_var.set(new_url)
+
+        ttk.Button(q_bar, text="⬆ 同步参数到 URL", style="Primary.TButton", command=_apply_query_to_url).pack(
+            side=tk.RIGHT, padx=2
+        )
+        ttk.Button(q_bar, text="⬇ 从 URL 提取参数", command=_extract_query_from_url).pack(side=tk.RIGHT, padx=2)
+
+        q_edit_frame = tk.Frame(tab_query, bg="#1E1F22")
+        q_edit_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+        q_scroll = ttk.Scrollbar(q_edit_frame, orient=tk.VERTICAL)
+        txt_req_query = tk.Text(
+            q_edit_frame,
+            bg="#1E1F22",
+            fg="#DFE1E5",
+            insertbackground="#FFFFFF",
+            selectbackground="#2E436E",
+            font=("Consolas", 10),
+            bd=0,
+            padx=10,
+            pady=8,
+            yscrollcommand=q_scroll.set,
+        )
+        q_scroll.config(command=txt_req_query.yview)
+        q_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_req_query.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt_req_query)
+
+        # -------------------- 3.2 下半区：实时响应结果查看器 --------------------
+        resp_frame = ttk.Frame(paned)
+        paned.add(resp_frame, minsize=220, height=340)
+
+        resp_bar = ttk.Frame(resp_frame, padding=(6, 4))
+        resp_bar.pack(fill=tk.X)
+
+        lbl_resp_status = tk.Label(
+            resp_bar,
+            text="💡 响应结果区：点击上方「🚀 发送请求」后将在此实时显示状态码、耗时与返回数据",
+            bg="#2B2D30",
+            fg="#56A8F5",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="w",
+        )
+        lbl_resp_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def _copy_debug_resp():
+            content = txt_resp_body.get("1.0", tk.END).strip()
+            if not content:
+                return
+            dlg.clipboard_clear()
+            dlg.clipboard_append(content)
+            lbl_resp_status.config(text="📋 已复制响应内容到剪贴板", fg="#73C991")
+
+        ttk.Button(
+            resp_bar,
+            text="🔒 加密选中",
+            command=lambda: self._encrypt_in_text_widget(txt_resp_body, dlg),
+        ).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(
+            resp_bar,
+            text="🔓 解密选中/全文",
+            style="Primary.TButton",
+            command=lambda: self._decrypt_in_text_widget(txt_resp_body, dlg),
+        ).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(resp_bar, text="📋 复制响应体", command=_copy_debug_resp).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(
+            resp_bar,
+            text="🔍 搜索响应 (Ctrl+F)",
+            command=lambda: txt_resp_body._open_search_bar() if hasattr(txt_resp_body, "_open_search_bar") else None,
+        ).pack(side=tk.RIGHT, padx=2)
+
+        resp_nb = ttk.Notebook(resp_frame)
+        resp_nb.pack(fill=tk.BOTH, expand=True)
+
+        # Resp Tab 1: Response Body
+        tab_resp_body = tk.Frame(resp_nb, bg="#1E1F22")
+        resp_nb.add(tab_resp_body, text="  📥 Response Body (响应内容)  ")
+        rb_scroll = ttk.Scrollbar(tab_resp_body, orient=tk.VERTICAL)
+        txt_resp_body = tk.Text(
+            tab_resp_body,
+            bg="#1E1F22",
+            fg="#DFE1E5",
+            insertbackground="#FFFFFF",
+            selectbackground="#2E436E",
+            font=("Consolas", 10),
+            bd=0,
+            padx=10,
+            pady=8,
+            yscrollcommand=rb_scroll.set,
+        )
+        rb_scroll.config(command=txt_resp_body.yview)
+        rb_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_resp_body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt_resp_body)
+
+        # Resp Tab 2: Response Headers
+        tab_resp_hdr = tk.Frame(resp_nb, bg="#1E1F22")
+        resp_nb.add(tab_resp_hdr, text="  📋 Response Headers (响应头与详情)  ")
+        rh_scroll = ttk.Scrollbar(tab_resp_hdr, orient=tk.VERTICAL)
+        txt_resp_hdr = tk.Text(
+            tab_resp_hdr,
+            bg="#1E1F22",
+            fg="#DFE1E5",
+            insertbackground="#FFFFFF",
+            selectbackground="#2E436E",
+            font=("Consolas", 10),
+            bd=0,
+            padx=10,
+            pady=8,
+            yscrollcommand=rh_scroll.set,
+        )
+        rh_scroll.config(command=txt_resp_hdr.yview)
+        rh_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_resp_hdr.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._attach_text_search(txt_resp_hdr)
+
+        # -------------------- 辅助函数：填充 Flow / 导入导出 cURL --------------------
+
+        def _parse_headers_text() -> dict[str, str]:
+            hdrs: dict[str, str] = {}
+            for line in txt_req_headers.get("1.0", tk.END).splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if ":" in s:
+                    k, v = s.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k.lower() not in ("content-length", "host", "connection"):
+                        hdrs[k] = v
+            return hdrs
+
+        def _load_from_flow(target_flow: HttpFlow | None):
+            if not target_flow or target_flow.method == "CONNECT":
+                messagebox.showinfo(
+                    "提示",
+                    "请先在主界面抓包列表中选中一条有效的 HTTP/HTTPS 接口请求！",
+                    parent=dlg,
+                )
+                return
+            m_var.set(target_flow.method or "GET")
+            url_var.set(target_flow.full_url)
+            h_lines = []
+            for k, v in target_flow.req_headers.items():
+                if k.lower() in ("content-length", "host", "connection", "accept-encoding"):
+                    continue
+                h_lines.append(f"{k}: {v}")
+            txt_req_headers.delete("1.0", tk.END)
+            txt_req_headers.insert("1.0", "\n".join(h_lines))
+
+            txt_req_body.delete("1.0", tk.END)
+            body_decoded = target_flow.get_decoded_body(is_request=True)
+            if body_decoded and not body_decoded.startswith("[二进制"):
+                txt_req_body.insert("1.0", body_decoded)
+
+            _extract_query_from_url()
+
+            if target_flow.status_code:
+                txt_resp_body.delete("1.0", tk.END)
+                txt_resp_body.insert("1.0", target_flow.get_decoded_body(is_request=False))
+                rh_lines = [
+                    f"Request URL:   {target_flow.full_url}",
+                    f"Request Method:{target_flow.method}",
+                    f"Status Code:   {target_flow.status_code} {target_flow.reason}",
+                    f"Server IP:     {target_flow.server_ip or '-'}",
+                    f"Duration:      {target_flow.duration_ms} ms",
+                    "\n" + "=" * 28 + " Response Headers " + "=" * 28,
+                ]
+                for k, v in target_flow.resp_headers.items():
+                    rh_lines.append(f"{k}: {v}")
+                txt_resp_hdr.delete("1.0", tk.END)
+                txt_resp_hdr.insert("1.0", "\n".join(rh_lines))
+                lbl_resp_status.config(
+                    text=f"📌 已载入抓包记录 #{target_flow.flow_id}（原状态: {target_flow.status_code} | {target_flow.duration_ms} ms），可修改参数后点击「🚀 发送请求」",
+                    fg="#56A8F5",
+                )
+
+        def _import_from_curl():
+            import shlex
+            try:
+                clip = dlg.clipboard_get().strip()
+            except Exception:
+                clip = ""
+            if not clip or not clip.lower().lstrip().startswith("curl"):
+                messagebox.showinfo(
+                    "导入 cURL",
+                    "请先复制一条以 curl 开头的命令到剪贴板，再点击「📋 粘贴导入 cURL」！",
+                    parent=dlg,
+                )
+                return
+            try:
+                cleaned = re.sub(r"\\\r?\n", " ", clip)
+                cleaned = re.sub(r"\^\r?\n", " ", cleaned)
+                tokens = shlex.split(cleaned, posix=True)
+                parsed_method = ""
+                parsed_url = ""
+                parsed_headers = []
+                parsed_data = []
+                i = 1
+                while i < len(tokens):
+                    tk_item = tokens[i]
+                    if tk_item in ("-X", "--request") and i + 1 < len(tokens):
+                        parsed_method = tokens[i + 1].upper()
+                        i += 2
+                    elif tk_item in ("-H", "--header") and i + 1 < len(tokens):
+                        parsed_headers.append(tokens[i + 1])
+                        i += 2
+                    elif tk_item in ("-d", "--data", "--data-raw", "--data-binary", "--data-urlencode") and i + 1 < len(tokens):
+                        parsed_data.append(tokens[i + 1])
+                        i += 2
+                    elif tk_item in ("-u", "--user", "-A", "--user-agent", "-e", "--referer", "-b", "--cookie") and i + 1 < len(tokens):
+                        if tk_item in ("-A", "--user-agent"):
+                            parsed_headers.append(f"User-Agent: {tokens[i + 1]}")
+                        elif tk_item in ("-e", "--referer"):
+                            parsed_headers.append(f"Referer: {tokens[i + 1]}")
+                        elif tk_item in ("-b", "--cookie"):
+                            parsed_headers.append(f"Cookie: {tokens[i + 1]}")
+                        i += 2
+                    elif tk_item.startswith("http://") or tk_item.startswith("https://"):
+                        parsed_url = tk_item
+                        i += 1
+                    elif not tk_item.startswith("-") and not parsed_url and "." in tk_item:
+                        parsed_url = "https://" + tk_item
+                        i += 1
+                    else:
+                        i += 1
+
+                if not parsed_method:
+                    parsed_method = "POST" if parsed_data else "GET"
+                m_var.set(parsed_method)
+                if parsed_url:
+                    url_var.set(parsed_url)
+                txt_req_headers.delete("1.0", tk.END)
+                txt_req_headers.insert("1.0", "\n".join(parsed_headers))
+                txt_req_body.delete("1.0", tk.END)
+                if parsed_data:
+                    joined_body = "&".join(parsed_data) if len(parsed_data) > 1 else parsed_data[0]
+                    try:
+                        joined_body = json.dumps(json.loads(joined_body), ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    txt_req_body.insert("1.0", joined_body)
+                _extract_query_from_url()
+                lbl_resp_status.config(text=f"✅ 已从剪贴板成功导入 cURL 命令: [{parsed_method}] {parsed_url}", fg="#73C991")
+            except Exception as e:
+                messagebox.showwarning("解析 cURL 失败", f"未能解析剪贴板中的 cURL 命令：\n{e}", parent=dlg)
+
+        def _copy_as_curl():
             target_url = url_var.get().strip()
             method = m_var.get().strip().upper() or "GET"
-            body_str = txt_b.get("1.0", tk.END).strip()
-            body_bytes = body_str.encode("utf-8") if body_str and method != "GET" else None
-            headers = {
-                k: v
-                for k, v in flow.req_headers.items()
-                if k.lower() not in ("content-length", "host", "accept-encoding", "connection")
-            }
+            hdrs = _parse_headers_text()
+            body_str = txt_req_body.get("1.0", tk.END).strip()
+            parts = [f'curl -X {method} "{target_url}"']
+            for k, v in hdrs.items():
+                safe_v = v.replace('"', '\\"')
+                parts.append(f'  -H "{k}: {safe_v}"')
+            if body_str and method not in ("GET", "HEAD"):
+                compact = body_str.replace('"', '\\"').replace("\n", " ")
+                parts.append(f'  -d "{compact}"')
+            curl_str = " \\\n".join(parts)
+            dlg.clipboard_clear()
+            dlg.clipboard_append(curl_str)
+            lbl_resp_status.config(text="📋 已将当前接口配置复制为 cURL 命令", fg="#73C991")
+
+        def _reset_fields():
+            m_var.set("GET")
+            url_var.set("https://")
+            txt_req_headers.delete("1.0", tk.END)
+            txt_req_headers.insert(
+                "1.0",
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) RMYYDS-Client/1.0\n"
+                "Accept: application/json, text/plain, */*\n"
+                "Content-Type: application/json; charset=utf-8",
+            )
+            txt_req_body.delete("1.0", tk.END)
+            txt_req_query.delete("1.0", tk.END)
+            txt_resp_body.delete("1.0", tk.END)
+            txt_resp_hdr.delete("1.0", tk.END)
+            lbl_resp_status.config(text="🧹 已重置为空白请求模板", fg="#8C9099")
+            url_entry.focus_set()
+
+        ttk.Button(
+            tool_r,
+            text="📥 载入选中抓包",
+            command=lambda: _load_from_flow(self.selected_flow),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(
+            tool_r,
+            text="📋 粘贴导入 cURL",
+            command=_import_from_curl,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            tool_r,
+            text="📋 复制为 cURL",
+            command=_copy_as_curl,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            tool_r,
+            text="🧹 清空重置",
+            command=_reset_fields,
+        ).pack(side=tk.LEFT, padx=4)
+
+        if init_flow:
+            _load_from_flow(init_flow)
+        else:
+            _reset_fields()
+
+        # -------------------- 发送请求核心逻辑 --------------------
+        def _do_send(_event=None):
+            import urllib.request
+            target_url = url_var.get().strip()
+            if not target_url or target_url in ("http://", "https://"):
+                messagebox.showwarning("提示", "请输入完整的接口请求 URL 地址！", parent=dlg)
+                url_entry.focus_set()
+                return
+            if not target_url.startswith(("http://", "https://")):
+                target_url = "https://" + target_url
+                url_var.set(target_url)
+
+            method = m_var.get().strip().upper() or "GET"
+            headers = _parse_headers_text()
+            if not any(k.lower() == "user-agent" for k in headers):
+                headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RMYYDS-Client/1.0"
+
+            body_str = txt_req_body.get("1.0", tk.END).strip()
+            body_bytes = body_str.encode("utf-8") if (body_str and method not in ("GET", "HEAD")) else None
+            if body_bytes and not any(k.lower() == "content-type" for k in headers):
+                if body_str.startswith(("{", "[")):
+                    headers["Content-Type"] = "application/json; charset=utf-8"
+                else:
+                    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+
+            btn_send.config(state=tk.DISABLED, text="⏳ 发送中...")
+            lbl_resp_status.config(text=f"⏳ 正在请求 [{method}] {target_url} ...", fg="#D6BF55")
 
             def _bg():
                 t0 = time.time()
                 parsed = urllib.parse.urlsplit(target_url)
                 scheme = parsed.scheme or "https"
-                host = parsed.hostname or flow.host
+                host = parsed.hostname or ""
                 port = parsed.port or (443 if scheme == "https" else 80)
                 path = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+
                 new_f = HttpFlow(
                     self.engine.next_flow_id(),
                     scheme,
@@ -4967,19 +5759,24 @@ class CharlesCaptureWindow:
                     host,
                     port,
                     path,
-                    "Compose重发",
+                    "接口调试",
                 )
-                new_f.process_name = "💻 Compose重发"
+                new_f.process_name = "💻 接口调试"
                 new_f.req_headers = dict(headers)
                 new_f.req_body_raw = body_bytes or b""
-                new_f.notes = "🚀重发"
+                new_f.notes = "🚀调试"
+                try:
+                    new_f.server_ip = socket.gethostbyname(host) if host else ""
+                except Exception:
+                    pass
+
                 try:
                     req = urllib.request.Request(target_url, data=body_bytes, headers=headers, method=method)
                     handlers = [urllib.request.ProxyHandler({})]
                     if scheme == "https":
                         handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
                     opener = urllib.request.build_opener(*handlers)
-                    with opener.open(req, timeout=15) as resp:
+                    with opener.open(req, timeout=20) as resp:
                         resp_data = resp.read()
                         new_f.status_code = resp.status
                         new_f.reason = resp.reason
@@ -4993,24 +5790,97 @@ class CharlesCaptureWindow:
                     new_f.reason = str(he.reason)
                     new_f.resp_headers = dict(he.headers.items()) if he.headers else {}
                     new_f.resp_body_raw = err_data
+                    new_f.content_type = he.headers.get("Content-Type", "") if he.headers else ""
                     new_f.size_bytes = len(err_data)
                 except Exception as ex:
                     new_f.status_code = 502
-                    new_f.reason = "Compose Failed"
-                    new_f.resp_body_raw = str(ex).encode("utf-8")
+                    new_f.reason = "Request Failed"
+                    new_f.error = str(ex)
+                    new_f.resp_body_raw = f"请求发送失败: {ex}".encode("utf-8")
+                    new_f.size_bytes = len(new_f.resp_body_raw)
+
                 new_f.duration_ms = int((time.time() - t0) * 1000)
-                self.flow_queue.put(new_f)
-                self._post_status(f"🚀 已完成重发请求: [{method}] {target_url} -> HTTP {new_f.status_code}")
+
+                if record_to_list_var.get():
+                    self.flow_queue.put(new_f)
+                self._post_status(
+                    f"🚀 接口调试完成: [{method}] {target_url} -> HTTP {new_f.status_code} ({new_f.duration_ms} ms)"
+                )
+
+                def _update_ui():
+                    if not dlg.winfo_exists():
+                        return
+                    btn_send.config(state=tk.NORMAL, text="🚀 发送请求 (Ctrl+Enter)")
+                    if 200 <= new_f.status_code < 300:
+                        st_color = "#73C991"
+                        st_icon = "🟢"
+                    elif 300 <= new_f.status_code < 400:
+                        st_color = "#56A8F5"
+                        st_icon = "🔵"
+                    elif 400 <= new_f.status_code < 500:
+                        st_color = "#D6BF55"
+                        st_icon = "🟡"
+                    else:
+                        st_color = "#FF6B68"
+                        st_icon = "🔴"
+
+                    lbl_resp_status.config(
+                        text=(
+                            f"{st_icon} 状态: {new_f.status_code} {new_f.reason}   |   "
+                            f"耗时: {new_f.duration_ms} ms   |   "
+                            f"大小: {new_f.format_size()}   |   "
+                            f"IP: {new_f.server_ip or '-'}"
+                        ),
+                        fg=st_color,
+                    )
+                    decoded_resp = new_f.get_decoded_body(is_request=False)
+                    txt_resp_body.delete("1.0", tk.END)
+                    txt_resp_body.insert("1.0", decoded_resp if decoded_resp else "[响应无 Body 内容]")
+                    if hasattr(txt_resp_body, "_refresh_search_bar"):
+                        txt_resp_body._refresh_search_bar()
+
+                    rh_lines = [
+                        f"URL:           {new_f.full_url}",
+                        f"Method:        {new_f.method}",
+                        f"Status:        {new_f.status_code} {new_f.reason}",
+                        f"Server IP:     {new_f.server_ip or '-'}",
+                        f"Duration:      {new_f.duration_ms} ms",
+                        f"Response Size: {new_f.format_size()}",
+                    ]
+                    if new_f.error:
+                        rh_lines.append(f"Error:         {new_f.error}")
+                    rh_lines.append("\n" + "=" * 28 + " Response Headers " + "=" * 28)
+                    for k, v in new_f.resp_headers.items():
+                        rh_lines.append(f"{k}: {v}")
+                    rh_lines.append("\n" + "=" * 28 + " Request Headers " + "=" * 29)
+                    for k, v in new_f.req_headers.items():
+                        rh_lines.append(f"{k}: {v}")
+                    txt_resp_hdr.delete("1.0", tk.END)
+                    txt_resp_hdr.insert("1.0", "\n".join(rh_lines))
+                    if hasattr(txt_resp_hdr, "_refresh_search_bar"):
+                        txt_resp_hdr._refresh_search_bar()
+
+                self.win.after(0, _update_ui)
 
             threading.Thread(target=_bg, daemon=True).start()
-            dlg.destroy()
 
-        btm = ttk.Frame(dlg)
-        btm.pack(fill=tk.X, padx=12, pady=(4, 12))
-        ttk.Button(btm, text="🚀 立即发送请求", style="Primary.TButton", command=_do_send).pack(
-            side=tk.RIGHT, padx=4
-        )
-        ttk.Button(btm, text="取消", command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+        def _on_dlg_ctrl_f(_event=None):
+            focused = dlg.focus_get()
+            if isinstance(focused, tk.Text) and hasattr(focused, "_open_search_bar"):
+                return focused._open_search_bar()
+            # 默认优先搜索下方响应内容（若响应为空则搜索请求体）
+            if txt_resp_body.get("1.0", tk.END).strip() and hasattr(txt_resp_body, "_open_search_bar"):
+                return txt_resp_body._open_search_bar()
+            if hasattr(txt_req_body, "_open_search_bar"):
+                return txt_req_body._open_search_bar()
+            return "break"
+
+        btn_send.config(command=_do_send)
+        url_entry.bind("<Return>", _do_send)
+        dlg.bind("<Control-Return>", _do_send)
+        dlg.bind("<F11>", _toggle_fullscreen)
+        dlg.bind("<Control-f>", _on_dlg_ctrl_f)
+        dlg.bind("<Control-F>", _on_dlg_ctrl_f)
 
     def clear_flows(self):
         self.all_flows.clear()
