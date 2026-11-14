@@ -5143,7 +5143,7 @@ class CharlesCaptureWindow:
         dlg.configure(bg="#2B2D30")
         self.app._apply_app_icon(dlg)
 
-        # 1. 顶部地址栏：Method + URL + 发送按钮 + 缩小/全屏按钮
+        # 1. 顶部地址栏：Method + URL + 发送按钮
         top_r = ttk.Frame(dlg, padding=(12, 10, 12, 4))
         top_r.pack(fill=tk.X)
 
@@ -5173,48 +5173,18 @@ class CharlesCaptureWindow:
         )
         url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8), ipady=4)
 
-        # 窗口全屏/还原 & 缩小按钮
         def _toggle_fullscreen(_event=None):
             try:
-                if dlg.state() == "zoomed":
-                    dlg.state("normal")
-                    btn_full.config(text="🗖 全屏")
-                else:
-                    dlg.state("zoomed")
-                    btn_full.config(text="🗗 还原")
+                dlg.state("normal" if dlg.state() == "zoomed" else "zoomed")
             except Exception:
                 pass
-
-        def _shrink_or_minimize():
-            try:
-                if dlg.state() == "zoomed":
-                    dlg.state("normal")
-                    btn_full.config(text="🗖 全屏")
-                else:
-                    dlg.iconify()
-            except Exception:
-                pass
-
-        btn_full = ttk.Button(
-            top_r,
-            text="🗖 全屏",
-            command=_toggle_fullscreen,
-        )
-        btn_full.pack(side=tk.RIGHT, padx=(2, 0))
-
-        btn_shrink = ttk.Button(
-            top_r,
-            text="🗕 缩小",
-            command=_shrink_or_minimize,
-        )
-        btn_shrink.pack(side=tk.RIGHT, padx=2)
 
         btn_send = ttk.Button(
             top_r,
             text="🚀 发送请求 (Ctrl+Enter)",
             style="Primary.TButton",
         )
-        btn_send.pack(side=tk.RIGHT, padx=(0, 4))
+        btn_send.pack(side=tk.RIGHT)
 
         # 2. 快捷工具栏：载入选中抓包、粘贴导入 cURL、复制为 cURL、清空重置、同步到抓包列表开关
         tool_r = ttk.Frame(dlg, padding=(12, 2, 12, 6))
